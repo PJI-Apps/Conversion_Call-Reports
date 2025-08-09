@@ -6,6 +6,7 @@
 # - Map Categories, aggregate, weighted Avg Call Time
 # - Rolls up multiple weekly uploads into one monthly result
 # - Filters: Year, Month, Category, Name (picklists with "All")
+# - Results table + 3 interactive charts at the bottom
 # - No files written to disk
 # ---------------------------
 
@@ -17,6 +18,7 @@ import pandas as pd
 import streamlit as st
 import yaml
 import streamlit_authenticator as stauth
+import plotly.express as px
 
 
 # =========================
@@ -317,6 +319,22 @@ if not batches:
 # Combine all uploads (multi-month analysis supported by multiple uploads)
 df_all = pd.concat(batches, ignore_index=True)
 
+# ---- Backfill hidden seconds for legacy batches (if any) ----
+def _to_sec_col(s: pd.Series) -> pd.Series:
+    return pd.to_timedelta(s, errors="coerce").dt.total_seconds().fillna(0.0)
+
+for c in ["Total Calls", "Completed Calls", "Outgoing", "Received",
+          "Forwarded to Voicemail", "Answered by Other", "Missed"]:
+    if c in df_all.columns:
+        df_all[c] = pd.to_numeric(df_all[c], errors="coerce").fillna(0).astype(int)
+
+if "__total_sec" not in df_all.columns and "Total Call Time" in df_all.columns:
+    df_all["__total_sec"] = _to_sec_col(df_all["Total Call Time"])
+if "__hold_sec" not in df_all.columns and "Total Hold Time" in df_all.columns:
+    df_all["__hold_sec"] = _to_sec_col(df_all["Total Hold Time"])
+if "__avg_sec" not in df_all.columns and "Avg Call Time" in df_all.columns:
+    df_all["__avg_sec"] = _to_sec_col(df_all["Avg Call Time"])
+
 # ---- Roll up multiple uploads for the same Month-Year/Category/Name ----
 if not df_all.empty:
     grouped_counts = df_all.groupby(["Month-Year", "Category", "Name"], as_index=False).agg(
@@ -404,7 +422,7 @@ if sel_name != "All":
 view = df_all.loc[mask].copy()
 
 # =========================
-# 📊 RESULTS
+# 📊 RESULTS TABLE
 # =========================
 
 st.subheader("Results")
@@ -423,6 +441,76 @@ st.download_button(
     file_name="call_report_filtered.csv",
     type="primary"
 )
+
+# =========================
+# 📈 VISUALIZATIONS (BOTTOM)
+# =========================
+
+st.markdown("---")
+st.subheader("Visualizations")
+
+if view.empty:
+    st.info("No data for the selected filters.")
+else:
+    # ---- 1) Call Volume Trend Over Time ----
+    # Group by Month-Year and sum key call counts
+    vol = (view.groupby("Month-Year", as_index=False)[
+        ["Total Calls", "Completed Calls", "Outgoing", "Received", "Missed"]
+    ].sum())
+
+    # Order months correctly by turning Month-Year into a date
+    vol["_ym"] = pd.to_datetime(vol["Month-Year"] + "-01", format="%Y-%m-%d", errors="coerce")
+    vol = vol.sort_values("_ym")
+
+    # Melt to long form for separate lines
+    vol_long = vol.melt(id_vars=["Month-Year", "_ym"],
+                        value_vars=["Total Calls", "Completed Calls", "Outgoing", "Received", "Missed"],
+                        var_name="Metric", value_name="Count")
+
+    with st.expander("📈 Call volume trend over time", expanded=True):
+        fig1 = px.line(
+            vol_long, x="_ym", y="Count", color="Metric",
+            markers=True,
+            labels={"_ym": "Month", "Count": "Calls"}
+        )
+        # Friendly x-axis labels
+        fig1.update_layout(xaxis=dict(tickformat="%b %Y"))
+        st.plotly_chart(fig1, use_container_width=True)
+
+    # ---- 2) Completion Rate by Staff ----
+    comp = (view.groupby("Name", as_index=False)[["Completed Calls", "Total Calls"]].sum())
+    comp["Completion Rate (%)"] = comp.apply(
+        lambda r: (r["Completed Calls"] / r["Total Calls"] * 100.0) if r["Total Calls"] > 0 else 0.0,
+        axis=1
+    )
+    comp = comp.sort_values("Completion Rate (%)", ascending=False)
+
+    with st.expander("✅ Completion rate by staff", expanded=True):
+        fig2 = px.bar(
+            comp, x="Name", y="Completion Rate (%)",
+            labels={"Name": "Staff", "Completion Rate (%)": "Completion Rate (%)"}
+        )
+        fig2.update_layout(xaxis={'categoryorder': 'array', 'categoryarray': comp["Name"].tolist()})
+        st.plotly_chart(fig2, use_container_width=True)
+
+    # ---- 3) Average Call Duration by Staff ----
+    # Weighted by Total Calls across the filtered set
+    dur = view.copy()
+    # Protect against division by zero
+    by_name = dur.groupby("Name", as_index=False).apply(
+        lambda g: pd.Series({
+            "Avg Seconds (weighted)": (g["__avg_sec"] * g["Total Calls"]).sum() / max(g["Total Calls"].sum(), 1)
+        })
+    )
+    by_name["Avg Minutes"] = by_name["Avg Seconds (weighted)"] / 60.0
+    by_name = by_name.sort_values("Avg Minutes", ascending=False)
+
+    with st.expander("⏱️ Average call duration by staff (minutes)", expanded=True):
+        fig3 = px.bar(
+            by_name, x="Avg Minutes", y="Name", orientation="h",
+            labels={"Avg Minutes": "Minutes", "Name": "Staff"}
+        )
+        st.plotly_chart(fig3, use_container_width=True)
 
 with st.expander("Notes"):
     st.markdown(
