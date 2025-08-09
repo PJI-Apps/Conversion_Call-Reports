@@ -157,6 +157,9 @@ def _fmt_hms(seconds: pd.Series) -> pd.Series:
 
 def process_zoom_csv(raw: pd.DataFrame, period_key: str) -> pd.DataFrame:
     """Clean, filter, map, and aggregate a single Zoom CSV batch for the selected Month-Year."""
+    # --- Header normalization: trim leading/trailing spaces (fixes "Completed Calls  ")
+    raw.columns = [c.strip() for c in raw.columns]
+
     # Validate columns
     missing = [c for c in EXPECTED_COLUMNS if c not in raw.columns]
     if missing:
@@ -273,7 +276,7 @@ if uploaded:
         # First pass
         raw = pd.read_csv(uploaded)
         # If headers are odd (BOM/casing), try python engine as fallback
-        if set(EXPECTED_COLUMNS) - set(raw.columns):
+        if set(EXPECTED_COLUMNS) - set([c.strip() for c in raw.columns]):
             uploaded.seek(0)
             raw = pd.read_csv(uploaded, engine="python")
 
