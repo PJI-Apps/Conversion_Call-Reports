@@ -2,9 +2,10 @@
 # ---------------------------
 # Zoom Call Reports (Streamlit)
 # - Auth via streamlit-authenticator, YAML stored in Streamlit Secrets
-# - Upload Zoom CSV, assign Month-Year, whitelist Names, rename 1 Name
+# - Upload Zoom CSV, assign date range (within single month), whitelist Names, rename 1 Name
 # - Map Categories, aggregate, weighted Avg Call Time
-# - Filters: Month-Year, Category, Name
+# - Rolls up multiple weekly uploads into one monthly result
+# - Filters: Year, Month, Category, Name (picklists with "All")
 # - No files written to disk
 # ---------------------------
 
@@ -210,7 +211,7 @@ def process_zoom_csv(raw: pd.DataFrame, period_key: str) -> pd.DataFrame:
         }
     )
 
-    # Weighted average of Avg Call Time by Total Calls
+    # Weighted average of Avg Call Time by Total Calls within this upload
     totals = df.groupby(["Month-Year", "Category", "Name"], as_index=False).agg(
         total_calls_sum=("Total Calls", "sum"),
         avg_weighted_sum=("_avg_sec", lambda s: (s * df.loc[s.index, "Total Calls"]).sum()),
@@ -232,12 +233,18 @@ def process_zoom_csv(raw: pd.DataFrame, period_key: str) -> pd.DataFrame:
     out["Total Call Time"] = _fmt_hms(out["_total_sec"])
     out["Total Hold Time"] = _fmt_hms(out["_hold_sec"])
 
-    # Reorder & tidy
+    # Keep hidden seconds so multiple weekly uploads can be rolled up later
+    out["__avg_sec"]   = out["avg_sec_weighted"]
+    out["__total_sec"] = out["_total_sec"]
+    out["__hold_sec"]  = out["_hold_sec"]
+
+    # Reorder & tidy (return display cols + hidden numeric cols)
     out = out[[
         "Category", "Name",
         "Total Calls", "Completed Calls", "Outgoing", "Received",
         "Forwarded to Voicemail", "Answered by Other", "Missed",
-        "Avg Call Time", "Total Call Time", "Total Hold Time", "Month-Year"
+        "Avg Call Time", "Total Call Time", "Total Hold Time", "Month-Year",
+        "__avg_sec", "__total_sec", "__hold_sec"
     ]].sort_values(["Category", "Name"]).reset_index(drop=True)
 
     return out
@@ -248,23 +255,38 @@ def process_zoom_csv(raw: pd.DataFrame, period_key: str) -> pd.DataFrame:
 # =========================
 
 st.title("📞 Zoom Call Reports")
-
 st.markdown(
     """
-Upload the CSV exported from Zoom, select the Month/Year that the file represents,
+Upload the CSV exported from Zoom, select the **date range within a single month** that the file represents,
 and view/filter the processed results. **No files are written to disk** — uploads live only in memory.
 """
 )
 
-# Month/Year picker (applies to the current upload)
-default_date = dt.date.today().replace(day=1)
-period_date = st.date_input(
-    "Select the Month/Year this upload represents",
-    value=default_date,
-)
-period_key = f"{period_date.year}-{period_date.month:02d}"
+# ---- Upload period: date range (must be within one month) ----
+today = dt.date.today()
+first_of_month = today.replace(day=1)
+# last day of current month
+next_month = (first_of_month.replace(day=28) + dt.timedelta(days=4)).replace(day=1)
+last_of_month = next_month - dt.timedelta(days=1)
 
-uploaded = st.file_uploader("Upload Zoom CSV", type=["csv"])
+st.subheader("Upload period")
+col_from, col_to = st.columns(2)
+period_start = col_from.date_input("Start date", value=first_of_month)
+period_end   = col_to.date_input("End date", value=last_of_month)
+
+# Validate: same calendar month and year, and start ≤ end
+if period_start > period_end:
+    st.error("Start date must be on or before End date.")
+    st.stop()
+
+if (period_start.year, period_start.month) != (period_end.year, period_end.month):
+    st.error("Please select a range within a **single** calendar month (e.g., 1–31 July 2025).")
+    st.stop()
+
+# Month-Year key for grouping (e.g., "2025-07")
+period_key = f"{period_start.year}-{period_start.month:02d}"
+
+uploaded = st.file_uploader("Upload Zoom CSV for this period", type=["csv"])
 
 # Hold processed batches in memory for this session
 if "batches" not in st.session_state:
@@ -295,7 +317,39 @@ if not batches:
 # Combine all uploads (multi-month analysis supported by multiple uploads)
 df_all = pd.concat(batches, ignore_index=True)
 
-# Filters
+# ---- Roll up multiple uploads for the same Month-Year/Category/Name ----
+if not df_all.empty:
+    grouped_counts = df_all.groupby(["Month-Year", "Category", "Name"], as_index=False).agg(
+        {
+            "Total Calls": "sum",
+            "Completed Calls": "sum",
+            "Outgoing": "sum",
+            "Received": "sum",
+            "Forwarded to Voicemail": "sum",
+            "Answered by Other": "sum",
+            "Missed": "sum",
+            "__total_sec": "sum",
+            "__hold_sec": "sum",
+        }
+    )
+
+    # Weighted average seconds for Avg Call Time across uploads (weights = Total Calls)
+    weights = df_all.groupby(["Month-Year", "Category", "Name"], as_index=False).apply(
+        lambda g: pd.Series({
+            "__avg_sec": (g["__avg_sec"] * g["Total Calls"]).sum() / max(g["Total Calls"].sum(), 1)
+        })
+    )
+    df_all = grouped_counts.merge(weights, on=["Month-Year", "Category", "Name"], how="left")
+
+    # Refresh the human-readable duration strings for the rolled-up rows
+    df_all["Avg Call Time"]   = _fmt_hms(df_all["__avg_sec"])
+    df_all["Total Call Time"] = _fmt_hms(df_all["__total_sec"])
+    df_all["Total Hold Time"] = _fmt_hms(df_all["__hold_sec"])
+
+# =========================
+# 🔎 FILTERS (picklists with "All")
+# =========================
+
 st.subheader("Filters")
 
 def with_all(options):
@@ -337,6 +391,7 @@ if sel_year != "All":
     mask &= df_all["Month-Year"].str.startswith(str(sel_year))
 
 if sel_month_name != "All":
+    # map month name back to number
     month_num = [k for k, v in months_map.items() if v == sel_month_name][0]
     mask &= df_all["Month-Year"].str.endswith(month_num)
 
@@ -348,7 +403,16 @@ if sel_name != "All":
 
 view = df_all.loc[mask].copy()
 
+# =========================
+# 📊 RESULTS
+# =========================
 
+st.subheader("Results")
+st.dataframe(
+    view[OUT_COLUMNS],
+    hide_index=True,
+    use_container_width=True,
+)
 
 # Download filtered CSV (memory only)
 csv_buf = io.StringIO()
@@ -365,8 +429,8 @@ with st.expander("Notes"):
         """
 - **Whitelisted Names only** are included in the report.
 - “**Riekie Van Ellinckhuyzen**” is displayed as “**Maria Van Ellinckhuyzen**”.
-- **Avg Call Time** is a **weighted average** by *Total Calls* across the upload.
-- **Month-Year** applies to the whole uploaded file; upload additional months to compare.
+- **Avg Call Time** is a **weighted average** by *Total Calls* across uploads within the same month.
+- **Upload period** must be within a single calendar month; upload multiple weekly CSVs for the same month to roll them up.
 - Nothing is saved to disk; data remains in session memory only.
 """
     )
