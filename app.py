@@ -1,18 +1,18 @@
 # app.py
 # ---------------------------
-# Zoom Call Reports (Streamlit)
-# - Auth via streamlit-authenticator, YAML stored in Streamlit Secrets
-# - Upload Zoom CSV, assign date range (within single month), whitelist Names, rename 1 Name
-# - Map Categories, aggregate, weighted Avg Call Time
-# - Rolls up multiple weekly uploads into one monthly result
-# - Filters: Year, Month, Category, Name (picklists with "All")
-# - Results table + 3 interactive charts at the bottom
+# Zoom Call Reports + Leads/PNCs + New Client List (Streamlit)
+# - Auth via streamlit-authenticator, YAML in Streamlit Secrets
+# - Three uploads, each tagged with a date range (single month), rolled up monthly
+# - Intake specialist bucketing; PNC logic; retained counts (Y/N)
+# - Filters: Year, Month, Category, Name (for Calls)
+# - Top Block KPIs based on selected Year/Month (for Leads/PNCs + New Client List)
+# - Results table + 3 charts (Calls) at bottom
 # - No files written to disk
 # ---------------------------
 
 import io
 import datetime as dt
-from typing import List, Dict
+from typing import List, Dict, Tuple
 
 import pandas as pd
 import streamlit as st
@@ -24,33 +24,10 @@ import plotly.express as px
 # =========================
 # 🔐 AUTHENTICATION (YAML in Secrets)
 # =========================
-# In Streamlit Cloud → Settings → Secrets (TOML) add:
-#
-# [auth_config]
-# config = """
-# credentials:
-#   usernames:
-#     kelly:
-#       name: Kelly Graham
-#       email: kgraham@pjilaw.com
-#       password: "$2b$12$...."  # bcrypt hash
-# cookie:
-#   name: referrals_app_cookie
-#   key: "LONG_RANDOM_STRING_32+CHARS"
-#   expiry_days: 30
-# preauthorized:
-#   emails:
-#     - kgraham@pjilaw.com
-# """
-#
-# (Matches your previous project's pattern.)
+st.set_page_config(page_title="Conversion Reports", page_icon="☎️", layout="wide")
 
-st.set_page_config(page_title="Call Reports", page_icon="☎️", layout="wide")
-
-# Load config from secrets and gate the app
 try:
     config = yaml.safe_load(st.secrets["auth_config"]["config"])
-
     authenticator = stauth.Authenticate(
         config["credentials"],
         config["cookie"]["name"],
@@ -63,55 +40,36 @@ try:
     name, auth_status, username = authenticator.login(fields=fields, location="main")
 
     if auth_status is False:
-        st.error("Username/password is incorrect")
-        st.stop()
+        st.error("Username/password is incorrect"); st.stop()
     elif auth_status is None:
-        st.warning("Please enter your username and password")
-        st.stop()
+        st.warning("Please enter your username and password"); st.stop()
     else:
         with st.sidebar:
             authenticator.logout("Logout", "sidebar")
             st.caption(f"Signed in as **{name}**")
 except Exception as e:
     st.error("Authentication is not configured correctly. Check your **Secrets**.")
-    st.exception(e)
-    st.stop()
+    st.exception(e); st.stop()
 
 
 # =========================
-# 📋 CONSTANTS & MAPPINGS
+# 📋 CONSTANTS & MAPPINGS (CALLS)
 # =========================
 
-# Zoom CSV expected columns (as provided)
-EXPECTED_COLUMNS: List[str] = [
+EXPECTED_COLUMNS_CALLS: List[str] = [
     "Name", "Email", "Ext.", "Total Calls", "Completed Calls", "Outgoing", "Received",
     "Forwarded to Voicemail", "Answered by Other", "Missed",
     "Avg Call Time", "Total Call Time", "Total Hold Time", "Primary Group"
 ]
 
-# Whitelisted names (only these rows are relevant)
-ALLOWED: List[str] = [
-    "Anastasia Economopoulos",
-    "Aneesah Shaik",
-    "Azariah",
-    "Chloe",
-    "Donnay",
-    "Earl",
-    "Faeryal Sahadeo",
-    "Kaithlyn",
-    "Micayla Sam",
-    "Nathanial Beneke",
-    "Nobuhle",
-    "Rialet",
-    "Riekie Van Ellinckhuyzen",  # will be renamed to Maria (display only)
-    "Shaylin Steyn",
-    "Sihle Gadu",
-    "Thabang Tshubyane",
-    "Tiffany",
+ALLOWED_CALLS: List[str] = [
+    "Anastasia Economopoulos", "Aneesah Shaik", "Azariah", "Chloe", "Donnay", "Earl",
+    "Faeryal Sahadeo", "Kaithlyn", "Micayla Sam", "Nathanial Beneke", "Nobuhle",
+    "Rialet", "Riekie Van Ellinckhuyzen", "Shaylin Steyn", "Sihle Gadu",
+    "Thabang Tshubyane", "Tiffany",
 ]
 
-# Category mapping (include both original & renamed for safety)
-CATEGORY: Dict[str, str] = {
+CATEGORY_CALLS: Dict[str, str] = {
     "Anastasia Economopoulos": "Intake",
     "Aneesah Shaik": "Intake",
     "Azariah": "Intake",
@@ -125,400 +83,522 @@ CATEGORY: Dict[str, str] = {
     "Nobuhle": "Intake IC",
     "Rialet": "Intake",
     "Riekie Van Ellinckhuyzen": "Receptionist",   # original
-    "Maria Van Ellinckhuyzen": "Receptionist",    # renamed
+    "Maria Van Ellinckhuyzen": "Receptionist",    # renamed display
     "Shaylin Steyn": "Receptionist",
     "Sihle Gadu": "Intake",
     "Thabang Tshubyane": "Intake",
     "Tiffany": "Intake",
 }
 
-# Single rename rule
-RENAME_NAME = {"Riekie Van Ellinckhuyzen": "Maria Van Ellinckhuyzen"}
+RENAME_NAME_CALLS = {"Riekie Van Ellinckhuyzen": "Maria Van Ellinckhuyzen"}
 
-# Output columns order
-OUT_COLUMNS = [
+OUT_COLUMNS_CALLS = [
     "Category", "Name", "Total Calls", "Completed Calls", "Outgoing", "Received",
     "Forwarded to Voicemail", "Answered by Other", "Missed",
     "Avg Call Time", "Total Call Time", "Total Hold Time", "Month-Year"
 ]
 
+# =========================
+# 📋 CONSTANTS (LEADS/PNCs CSV)
+# Structure:
+# First Name, Last Name, Email, Stage, Assigned Intake Specialist, Status, Sub Status,
+# Matter ID, Reason for Rescheduling, No Follow Up (Reason), Refer Out?, Lead Attorney,
+# Initial Consultation With Pji Law, Initial Consultation Rescheduled With Pji Law,
+# Discovery Meeting Rescheduled With Pji Law, Discovery Meeting With Pji Law, Practice Area
+# =========================
+
+EXPECTED_COLUMNS_PNC: List[str] = [
+    "First Name", "Last Name", "Email", "Stage", "Assigned Intake Specialist", "Status",
+    "Sub Status", "Matter ID", "Reason for Rescheduling", "No Follow Up (Reason)",
+    "Refer Out?", "Lead Attorney", "Initial Consultation With Pji Law",
+    "Initial Consultation Rescheduled With Pji Law", "Discovery Meeting Rescheduled With Pji Law",
+    "Discovery Meeting With Pji Law", "Practice Area"
+]
+
+INTAKE_TEAM = [
+    "Anastasia", "Aneesah", "Azariah", "Earl", "Faeryal",
+    "Kaithlyn",  # normalized from "Kaithyln"
+    "Micayla", "Nathanial", "Nobuhle", "Rialet", "Sihle", "Thabang", "Tiffany"
+]
+OTHER_BUCKET = "Jessie & Everyone else’s intake"
+
+# Normalize Assigned Intake Specialist variants
+SPECIALIST_NORMALIZE = {
+    "Kaithyln": "Kaithlyn",
+    "Kaithlyn": "Kaithlyn",
+}
+
+# Stages that are NOT PNCs (excluded from PNC count)
+EXCLUDED_PNC_STAGES = {
+    "Marketing/Scam/Spam (Non-Lead)", "Referred Out", "No Stage", "New Lead",
+    "No Follow Up (No Marketing/Communication)", "No Follow Up (Receives Marketing/Communication)",
+    "Anastasia E", "Aneesah S.", "Azariah P.", "Earl M.", "Faeryal S.", "Kaithlyn M.",
+    "Micayla S.", "Nathanial B.", "Rialet v H.", "Sihle G.", "Thabang T.", "Tiffany P",
+    ":Chloe L:", "Nobuhle M."
+}
 
 # =========================
-# 🧮 UTILITIES
+# 📋 CONSTANTS (NEW CLIENT LIST CSV)
+# Structure:
+# Client Name, Practice Area, Matter Number/Link, Responsible Attorney,
+# Retained With Consult (Y/N), Date we had BOTH the signed CLA and full payment,
+# Substantially related to existing matter?, Qualifies for bonus?, Primary Intake?, File open fee
+# =========================
+
+EXPECTED_COLUMNS_NCL: List[str] = [
+    "Client Name", "Practice Area", "Matter Number/Link", "Responsible Attorney",
+    "Retained With Consult (Y/N)", "Date we had BOTH the signed CLA and full payment",
+    "Substantially related to existing matter?", "Qualifies for bonus?",
+    "Primary Intake?", "File open fee"
+]
+
+
+# =========================
+# 🧮 SHARED UTILITIES
 # =========================
 
 def _to_seconds(series: pd.Series) -> pd.Series:
-    """Parse HH:MM:SS or MM:SS strings to seconds (float)."""
     td = pd.to_timedelta(series, errors="coerce")
     return td.dt.total_seconds().fillna(0.0)
 
-
 def _fmt_hms(seconds: pd.Series) -> pd.Series:
-    """Format seconds (float) as H:MM:SS strings."""
     return seconds.round().astype(int).map(lambda s: str(dt.timedelta(seconds=s)))
 
+def month_key_from_range(start: dt.date, end: dt.date) -> str:
+    return f"{start.year}-{start.month:02d}"
 
-def process_zoom_csv(raw: pd.DataFrame, period_key: str) -> pd.DataFrame:
-    """Clean, filter, map, and aggregate a single Zoom CSV batch for the selected Month-Year."""
-    # --- Header normalization: trim leading/trailing spaces (fixes "Completed Calls  ")
+def validate_single_month_range(start: dt.date, end: dt.date) -> Tuple[bool, str]:
+    if start > end:
+        return False, "Start date must be on or before End date."
+    if (start.year, start.month) != (end.year, end.month):
+        return False, "Please select a range within a single calendar month (e.g., 1–31 July 2025)."
+    return True, ""
+
+
+# =========================
+# 🧩 PROCESSORS
+# =========================
+
+def process_calls_csv(raw: pd.DataFrame, period_key: str) -> pd.DataFrame:
     raw.columns = [c.strip() for c in raw.columns]
-
-    # Validate columns
-    missing = [c for c in EXPECTED_COLUMNS if c not in raw.columns]
+    missing = [c for c in EXPECTED_COLUMNS_CALLS if c not in raw.columns]
     if missing:
-        raise ValueError(f"CSV is missing columns: {missing}")
+        raise ValueError(f"Calls CSV is missing columns: {missing}")
 
     df = raw.copy()
-
-    # Keep only allowed Names
-    df = df[df["Name"].isin(ALLOWED)].copy()
-
-    # Rename single Name as requested
-    df["Name"] = df["Name"].replace(RENAME_NAME)
-
-    # Map Category (fallback to 'Other' if ever needed)
-    df["Category"] = df["Name"].map(lambda n: CATEGORY.get(n, "Other"))
-
-    # Drop Email, Ext. (not needed downstream)
+    df = df[df["Name"].isin(ALLOWED_CALLS)].copy()
+    df["Name"] = df["Name"].replace(RENAME_NAME_CALLS)
+    df["Category"] = df["Name"].map(lambda n: CATEGORY_CALLS.get(n, "Other"))
     df = df.drop(columns=["Email", "Ext."], errors="ignore")
 
-    # Coerce numeric count columns to int
-    count_cols = [
-        "Total Calls", "Completed Calls", "Outgoing", "Received",
-        "Forwarded to Voicemail", "Answered by Other", "Missed"
-    ]
-    for c in count_cols:
+    for c in ["Total Calls","Completed Calls","Outgoing","Received",
+              "Forwarded to Voicemail","Answered by Other","Missed"]:
         df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0).astype(int)
 
-    # Parse durations to seconds
     df["_avg_sec"] = _to_seconds(df["Avg Call Time"])
     df["_total_sec"] = _to_seconds(df["Total Call Time"])
-    df["_hold_sec"] = _to_seconds(df["Total Hold Time"])
-
-    # Assign Month-Year (applies to entire upload)
+    df["_hold_sec"]  = _to_seconds(df["Total Hold Time"])
     df["Month-Year"] = period_key
 
-    # Aggregate to one row per Name per Month-Year
-    grouped = df.groupby(["Month-Year", "Category", "Name"], as_index=False).agg(
+    grouped = df.groupby(["Month-Year","Category","Name"], as_index=False).agg(
         {
-            "Total Calls": "sum",
-            "Completed Calls": "sum",
-            "Outgoing": "sum",
-            "Received": "sum",
-            "Forwarded to Voicemail": "sum",
-            "Answered by Other": "sum",
-            "Missed": "sum",
-            "_total_sec": "sum",
-            "_hold_sec": "sum",
+            "Total Calls":"sum","Completed Calls":"sum","Outgoing":"sum","Received":"sum",
+            "Forwarded to Voicemail":"sum","Answered by Other":"sum","Missed":"sum",
+            "_total_sec":"sum","_hold_sec":"sum",
         }
     )
-
-    # Weighted average of Avg Call Time by Total Calls within this upload
-    totals = df.groupby(["Month-Year", "Category", "Name"], as_index=False).agg(
-        total_calls_sum=("Total Calls", "sum"),
-        avg_weighted_sum=("_avg_sec", lambda s: (s * df.loc[s.index, "Total Calls"]).sum()),
+    totals = df.groupby(["Month-Year","Category","Name"], as_index=False).agg(
+        total_calls_sum=("Total Calls","sum"),
+        avg_weighted_sum=("_avg_sec", lambda s: (s * df.loc[s.index,"Total Calls"]).sum()),
     )
-    # Avoid division by zero
     totals["avg_sec_weighted"] = totals.apply(
-        lambda r: (r["avg_weighted_sum"] / r["total_calls_sum"]) if r["total_calls_sum"] > 0 else 0.0,
-        axis=1,
+        lambda r: (r["avg_weighted_sum"]/r["total_calls_sum"]) if r["total_calls_sum"]>0 else 0.0, axis=1
     )
-
     out = grouped.merge(
-        totals[["Month-Year", "Category", "Name", "avg_sec_weighted"]],
-        on=["Month-Year", "Category", "Name"],
-        how="left",
+        totals[["Month-Year","Category","Name","avg_sec_weighted"]],
+        on=["Month-Year","Category","Name"], how="left"
     )
-
-    # Format durations back to H:MM:SS
-    out["Avg Call Time"] = _fmt_hms(out["avg_sec_weighted"])
+    out["Avg Call Time"]   = _fmt_hms(out["avg_sec_weighted"])
     out["Total Call Time"] = _fmt_hms(out["_total_sec"])
     out["Total Hold Time"] = _fmt_hms(out["_hold_sec"])
 
-    # Keep hidden seconds so multiple weekly uploads can be rolled up later
     out["__avg_sec"]   = out["avg_sec_weighted"]
     out["__total_sec"] = out["_total_sec"]
     out["__hold_sec"]  = out["_hold_sec"]
 
-    # Reorder & tidy (return display cols + hidden numeric cols)
     out = out[[
-        "Category", "Name",
-        "Total Calls", "Completed Calls", "Outgoing", "Received",
-        "Forwarded to Voicemail", "Answered by Other", "Missed",
-        "Avg Call Time", "Total Call Time", "Total Hold Time", "Month-Year",
-        "__avg_sec", "__total_sec", "__hold_sec"
-    ]].sort_values(["Category", "Name"]).reset_index(drop=True)
-
+        "Category","Name","Total Calls","Completed Calls","Outgoing","Received",
+        "Forwarded to Voicemail","Answered by Other","Missed",
+        "Avg Call Time","Total Call Time","Total Hold Time","Month-Year",
+        "__avg_sec","__total_sec","__hold_sec"
+    ]].sort_values(["Category","Name"]).reset_index(drop=True)
     return out
 
 
+def process_pnc_csv(raw: pd.DataFrame, period_key: str) -> pd.DataFrame:
+    # Leads/PNCs file
+    raw.columns = [c.strip() for c in raw.columns]
+    missing = [c for c in EXPECTED_COLUMNS_PNC if c not in raw.columns]
+    if missing:
+        raise ValueError(f"Leads/PNCs CSV is missing columns: {missing}")
+
+    df = raw.copy()
+
+    # Normalize Assigned Intake Specialist
+    spec = df["Assigned Intake Specialist"].astype(str).str.strip()
+    spec = spec.replace(SPECIALIST_NORMALIZE)
+    # Take just the first word (e.g., "Anastasia E" -> "Anastasia"), then title-case
+    spec_first = spec.str.split().str[0].fillna("")
+    spec_first = spec_first.str.replace(r"[^A-Za-z]", "", regex=True).str.title()
+
+    # Bucket
+    df["Intake Bucket"] = spec_first.apply(lambda s: s if s in INTAKE_TEAM else OTHER_BUCKET)
+
+    # Leads: all rows
+    df["Lead"] = 1
+
+    # PNCs: exclude listed stages
+    stage = df["Stage"].astype(str).str.strip()
+    df["PNC"] = (~stage.isin(EXCLUDED_PNC_STAGES)).astype(int)
+
+    # Month tag
+    df["Month-Year"] = period_key
+
+    # Aggregate by month + bucket (for easy top-block rollup)
+    agg = df.groupby(["Month-Year","Intake Bucket"], as_index=False).agg(
+        Leads=("Lead","sum"),
+        PNCs=("PNC","sum")
+    )
+    return agg
+
+
+def process_ncl_csv(raw: pd.DataFrame, period_key: str) -> pd.DataFrame:
+    # New Client List
+    raw.columns = [c.strip() for c in raw.columns]
+    missing = [c for c in EXPECTED_COLUMNS_NCL if c not in raw.columns]
+    if missing:
+        raise ValueError(f"New Client List CSV is missing columns: {missing}")
+
+    df = raw.copy()
+    df["Month-Year"] = period_key
+
+    # Normalize Retained With Consult (Y/N)
+    val = df["Retained With Consult (Y/N)"].astype(str).str.strip().str.upper()
+    retained_with_consult = (val == "Y").astype(int)
+    retained_without_consult = (val == "N").astype(int)
+
+    # Aggregate by month (no bucket needed yet)
+    agg = df.groupby("Month-Year", as_index=False).agg(
+        Retained_Total=("Retained With Consult (Y/N)", lambda s: s.notna().sum()),
+        Retained_With_Consult=("Retained With Consult (Y/N)", lambda s: (s.astype(str).str.upper() == "Y").sum()),
+        Retained_Without_Consult=("Retained With Consult (Y/N)", lambda s: (s.astype(str).str.upper() == "N").sum()),
+    )
+    return agg
+
+
 # =========================
-# 🖥️ UI
+# 🖥️ PAGE – Upload sections
 # =========================
 
-st.title("📞 Zoom Call Reports")
-st.markdown(
-    """
-Upload the CSV exported from Zoom, select the **date range within a single month** that the file represents,
-and view/filter the processed results. **No files are written to disk** — uploads live only in memory.
-"""
-)
+st.title("📈 Conversion Reports")
 
-# ---- Upload period: date range (must be within one month) ----
-today = dt.date.today()
-first_of_month = today.replace(day=1)
-# last day of current month
-next_month = (first_of_month.replace(day=28) + dt.timedelta(days=4)).replace(day=1)
-last_of_month = next_month - dt.timedelta(days=1)
+def single_month_inputs(label_prefix: str) -> Tuple[str, st.delta_generator.DeltaGenerator]:
+    # returns (period_key, uploader_widget)
+    today = dt.date.today()
+    first_of_month = today.replace(day=1)
+    next_month = (first_of_month.replace(day=28) + dt.timedelta(days=4)).replace(day=1)
+    last_of_month = next_month - dt.timedelta(days=1)
 
-st.subheader("Upload period")
-col_from, col_to = st.columns(2)
-period_start = col_from.date_input("Start date", value=first_of_month)
-period_end   = col_to.date_input("End date", value=last_of_month)
+    with st.expander(f"Upload: {label_prefix}", expanded=False):
+        col_from, col_to = st.columns(2)
+        period_start = col_from.date_input(f"{label_prefix} - Start date", value=first_of_month, key=f"{label_prefix}_start")
+        period_end   = col_to.date_input(f"{label_prefix} - End date", value=last_of_month, key=f"{label_prefix}_end")
+        ok, msg = validate_single_month_range(period_start, period_end)
+        if not ok:
+            st.error(msg); st.stop()
+        period_key = month_key_from_range(period_start, period_end)
+        uploader = st.file_uploader(f"Upload CSV for {label_prefix} ({period_key})", type=["csv"], key=f"{label_prefix}_uploader")
+    return period_key, uploader
 
-# Validate: same calendar month and year, and start ≤ end
-if period_start > period_end:
-    st.error("Start date must be on or before End date.")
-    st.stop()
+# Session stores
+for k in ["batches_calls","batches_pnc","batches_ncl"]:
+    if k not in st.session_state:
+        st.session_state[k] = []
 
-if (period_start.year, period_start.month) != (period_end.year, period_end.month):
-    st.error("Please select a range within a **single** calendar month (e.g., 1–31 July 2025).")
-    st.stop()
-
-# Month-Year key for grouping (e.g., "2025-07")
-period_key = f"{period_start.year}-{period_start.month:02d}"
-
-uploaded = st.file_uploader("Upload Zoom CSV for this period", type=["csv"])
-
-# Hold processed batches in memory for this session
-if "batches" not in st.session_state:
-    st.session_state["batches"] = []
-
-# If a CSV is uploaded, process it immediately
-if uploaded:
+# --- Calls uploader (existing) ---
+calls_period_key, calls_uploader = single_month_inputs("Zoom Calls")
+if calls_uploader:
     try:
-        # First pass
-        raw = pd.read_csv(uploaded)
-        # If headers are odd (BOM/casing), try python engine as fallback
-        if set(EXPECTED_COLUMNS) - set([c.strip() for c in raw.columns]):
-            uploaded.seek(0)
-            raw = pd.read_csv(uploaded, engine="python")
-
-        processed = process_zoom_csv(raw, period_key)
-        st.session_state["batches"].append(processed)
-        st.success(f"Loaded {len(processed)} row(s) for {period_key}.")
+        raw = pd.read_csv(calls_uploader)
+        if set(EXPECTED_COLUMNS_CALLS) - set([c.strip() for c in raw.columns]):
+            calls_uploader.seek(0)
+            raw = pd.read_csv(calls_uploader, engine="python")
+        processed = process_calls_csv(raw, calls_period_key)
+        st.session_state["batches_calls"].append(processed)
+        st.success(f"Calls: loaded {len(processed)} row(s) for {calls_period_key}.")
     except Exception as e:
-        st.error("Could not parse CSV. Please check the column headers and try again.")
-        st.exception(e)
+        st.error("Could not parse Calls CSV."); st.exception(e)
 
-batches = st.session_state["batches"]
-if not batches:
-    st.info("Upload a CSV to begin.")
-    st.stop()
+# --- Leads/PNCs uploader (new) ---
+pnc_period_key, pnc_uploader = single_month_inputs("Leads / PNCs")
+if pnc_uploader:
+    try:
+        raw = pd.read_csv(pnc_uploader)
+        processed = process_pnc_csv(raw, pnc_period_key)
+        st.session_state["batches_pnc"].append(processed)
+        st.success(f"Leads/PNCs: loaded {processed['Leads'].sum()} leads, {processed['PNCs'].sum()} PNCs for {pnc_period_key}.")
+    except Exception as e:
+        st.error("Could not parse Leads/PNCs CSV."); st.exception(e)
 
-# Combine all uploads (multi-month analysis supported by multiple uploads)
-df_all = pd.concat(batches, ignore_index=True)
+# --- New Client List uploader (new) ---
+ncl_period_key, ncl_uploader = single_month_inputs("New Client List")
+if ncl_uploader:
+    try:
+        raw = pd.read_csv(ncl_uploader)
+        processed = process_ncl_csv(raw, ncl_period_key)
+        st.session_state["batches_ncl"].append(processed)
+        st.success(f"New Client List: loaded retained totals for {ncl_period_key}.")
+    except Exception as e:
+        st.error("Could not parse New Client List CSV."); st.exception(e)
 
-# ---- Backfill hidden seconds for legacy batches (if any) ----
-def _to_sec_col(s: pd.Series) -> pd.Series:
-    return pd.to_timedelta(s, errors="coerce").dt.total_seconds().fillna(0.0)
-
-for c in ["Total Calls", "Completed Calls", "Outgoing", "Received",
-          "Forwarded to Voicemail", "Answered by Other", "Missed"]:
-    if c in df_all.columns:
-        df_all[c] = pd.to_numeric(df_all[c], errors="coerce").fillna(0).astype(int)
-
-if "__total_sec" not in df_all.columns and "Total Call Time" in df_all.columns:
-    df_all["__total_sec"] = _to_sec_col(df_all["Total Call Time"])
-if "__hold_sec" not in df_all.columns and "Total Hold Time" in df_all.columns:
-    df_all["__hold_sec"] = _to_sec_col(df_all["Total Hold Time"])
-if "__avg_sec" not in df_all.columns and "Avg Call Time" in df_all.columns:
-    df_all["__avg_sec"] = _to_sec_col(df_all["Avg Call Time"])
-
-# ---- Roll up multiple uploads for the same Month-Year/Category/Name ----
-if not df_all.empty:
-    grouped_counts = df_all.groupby(["Month-Year", "Category", "Name"], as_index=False).agg(
-        {
-            "Total Calls": "sum",
-            "Completed Calls": "sum",
-            "Outgoing": "sum",
-            "Received": "sum",
-            "Forwarded to Voicemail": "sum",
-            "Answered by Other": "sum",
-            "Missed": "sum",
-            "__total_sec": "sum",
-            "__hold_sec": "sum",
-        }
-    )
-
-    # Weighted average seconds for Avg Call Time across uploads (weights = Total Calls)
-    weights = df_all.groupby(["Month-Year", "Category", "Name"], as_index=False).apply(
-        lambda g: pd.Series({
-            "__avg_sec": (g["__avg_sec"] * g["Total Calls"]).sum() / max(g["Total Calls"].sum(), 1)
-        })
-    )
-    df_all = grouped_counts.merge(weights, on=["Month-Year", "Category", "Name"], how="left")
-
-    # Refresh the human-readable duration strings for the rolled-up rows
-    df_all["Avg Call Time"]   = _fmt_hms(df_all["__avg_sec"])
-    df_all["Total Call Time"] = _fmt_hms(df_all["__total_sec"])
-    df_all["Total Hold Time"] = _fmt_hms(df_all["__hold_sec"])
 
 # =========================
-# 🔎 FILTERS (picklists with "All")
+# 🧮 Combine + roll-up
 # =========================
 
-st.subheader("Filters")
+# Calls
+if st.session_state["batches_calls"]:
+    df_calls = pd.concat(st.session_state["batches_calls"], ignore_index=True)
+    # Backfill hidden seconds if needed
+    def _to_sec_col(s: pd.Series) -> pd.Series:
+        return pd.to_timedelta(s, errors="coerce").dt.total_seconds().fillna(0.0)
+    for c in ["Total Calls","Completed Calls","Outgoing","Received",
+              "Forwarded to Voicemail","Answered by Other","Missed"]:
+        if c in df_calls.columns:
+            df_calls[c] = pd.to_numeric(df_calls[c], errors="coerce").fillna(0).astype(int)
+    if "__total_sec" not in df_calls.columns and "Total Call Time" in df_calls.columns:
+        df_calls["__total_sec"] = _to_sec_col(df_calls["Total Call Time"])
+    if "__hold_sec" not in df_calls.columns and "Total Hold Time" in df_calls.columns:
+        df_calls["__hold_sec"] = _to_sec_col(df_calls["Total Hold Time"])
+    if "__avg_sec" not in df_calls.columns and "Avg Call Time" in df_calls.columns:
+        df_calls["__avg_sec"] = _to_sec_col(df_calls["Avg Call Time"])
+
+    if not df_calls.empty:
+        grouped_counts = df_calls.groupby(["Month-Year","Category","Name"], as_index=False).agg(
+            {
+                "Total Calls":"sum","Completed Calls":"sum","Outgoing":"sum","Received":"sum",
+                "Forwarded to Voicemail":"sum","Answered by Other":"sum","Missed":"sum",
+                "__total_sec":"sum","__hold_sec":"sum",
+            }
+        )
+        weights = df_calls.groupby(["Month-Year","Category","Name"], as_index=False).apply(
+            lambda g: pd.Series({
+                "__avg_sec": (g["__avg_sec"] * g["Total Calls"]).sum() / max(g["Total Calls"].sum(), 1)
+            })
+        )
+        df_calls = grouped_counts.merge(weights, on=["Month-Year","Category","Name"], how="left")
+        df_calls["Avg Call Time"]   = _fmt_hms(df_calls["__avg_sec"])
+        df_calls["Total Call Time"] = _fmt_hms(df_calls["__total_sec"])
+        df_calls["Total Hold Time"] = _fmt_hms(df_calls["__hold_sec"])
+else:
+    df_calls = pd.DataFrame(columns=OUT_COLUMNS_CALLS + ["__avg_sec","__total_sec","__hold_sec"])
+
+# Leads/PNCs
+df_pnc = pd.concat(st.session_state["batches_pnc"], ignore_index=True) if st.session_state["batches_pnc"] else pd.DataFrame(columns=["Month-Year","Intake Bucket","Leads","PNCs"])
+
+# New Client List
+df_ncl = pd.concat(st.session_state["batches_ncl"], ignore_index=True) if st.session_state["batches_ncl"] else pd.DataFrame(columns=["Month-Year","Retained_Total","Retained_With_Consult","Retained_Without_Consult"])
+
+
+# =========================
+# 🔎 Filters (Calls only)
+# =========================
+
+st.subheader("Filters (Calls)")
 
 def with_all(options):
-    """Return sorted list with 'All' prepended."""
     return ["All"] + sorted(options)
 
 col1, col2, col3, col4 = st.columns(4)
 
-# --- Year picklist ---
-years = sorted({int(m.split("-")[0]) for m in df_all["Month-Year"].unique()})
-sel_year = col1.selectbox("Year", with_all(years), index=0)
+years = sorted({int(m.split("-")[0]) for m in df_calls["Month-Year"].unique()}) if not df_calls.empty else []
+sel_year = col1.selectbox("Year", with_all(years) if years else ["All"], index=0)
 
-# --- Month picklist ---
 months_map = {
-    "01": "January", "02": "February", "03": "March", "04": "April",
-    "05": "May", "06": "June", "07": "July", "08": "August",
-    "09": "September", "10": "October", "11": "November", "12": "December"
+    "01":"January","02":"February","03":"March","04":"April","05":"May","06":"June",
+    "07":"July","08":"August","09":"September","10":"October","11":"November","12":"December"
 }
-months_available = sorted({m.split("-")[1] for m in df_all["Month-Year"].unique()})
-month_names_available = [months_map[m] for m in months_available]
+months_available = sorted({m.split("-")[1] for m in df_calls["Month-Year"].unique()}) if not df_calls.empty else []
+month_names_available = [months_map[m] for m in months_available] if months_available else []
 sel_month_name = col2.selectbox("Month", ["All"] + month_names_available, index=0)
 
-# --- Category picklist ---
-cat_choices = with_all(df_all["Category"].unique().tolist())
+cat_choices = with_all(df_calls["Category"].unique().tolist()) if not df_calls.empty else ["All"]
 sel_cat = col3.selectbox("Category", cat_choices, index=0)
 
-# --- Name picklist (depends on category) ---
 if sel_cat == "All":
-    base = df_all
+    base = df_calls
 else:
-    base = df_all[df_all["Category"] == sel_cat]
-name_choices = with_all(base["Name"].unique().tolist())
+    base = df_calls[df_calls["Category"] == sel_cat]
+name_choices = with_all(base["Name"].unique().tolist()) if not base.empty else ["All"]
 sel_name = col4.selectbox("Name", name_choices, index=0)
 
-# Build mask
-mask = pd.Series(True, index=df_all.index)
-
+mask_calls = pd.Series(True, index=df_calls.index)
 if sel_year != "All":
-    mask &= df_all["Month-Year"].str.startswith(str(sel_year))
-
+    mask_calls &= df_calls["Month-Year"].str.startswith(str(sel_year))
 if sel_month_name != "All":
-    # map month name back to number
     month_num = [k for k, v in months_map.items() if v == sel_month_name][0]
-    mask &= df_all["Month-Year"].str.endswith(month_num)
-
+    mask_calls &= df_calls["Month-Year"].str.endswith(month_num)
 if sel_cat != "All":
-    mask &= df_all["Category"] == sel_cat
-
+    mask_calls &= df_calls["Category"] == sel_cat
 if sel_name != "All":
-    mask &= df_all["Name"] == sel_name
+    mask_calls &= df_calls["Name"] == sel_name
 
-view = df_all.loc[mask].copy()
+view_calls = df_calls.loc[mask_calls].copy()
 
-# =========================
-# 📊 RESULTS TABLE
-# =========================
-
-st.subheader("Results")
-st.dataframe(
-    view[OUT_COLUMNS],
-    hide_index=True,
-    use_container_width=True,
-)
-
-# Download filtered CSV (memory only)
-csv_buf = io.StringIO()
-view.to_csv(csv_buf, index=False)
-st.download_button(
-    "Download filtered CSV",
-    csv_buf.getvalue(),
-    file_name="call_report_filtered.csv",
-    type="primary"
-)
 
 # =========================
-# 📈 VISUALIZATIONS (BOTTOM)
+# 🧮 Top Block (Leads/PNCs + NCL)
+# Uses the same selected Year/Month to pick which monthly batches to show.
+# If "All" is selected for Year/Month, we sum across what's available.
 # =========================
 
 st.markdown("---")
-st.subheader("Visualizations")
+st.subheader("Top Block — Conversion KPIs")
 
-if view.empty:
-    st.info("No data for the selected filters.")
+def month_mask(df: pd.DataFrame) -> pd.Series:
+    if df.empty: 
+        return pd.Series([], dtype=bool)
+    m = pd.Series(True, index=df.index)
+    if sel_year != "All":
+        m &= df["Month-Year"].str.startswith(str(sel_year))
+    if sel_month_name != "All":
+        month_num_local = [k for k, v in months_map.items() if v == sel_month_name][0]
+        m &= df["Month-Year"].str.endswith(month_num_local)
+    return m
+
+pnc_view = df_pnc.loc[month_mask(df_pnc)].copy()
+ncl_view = df_ncl.loc[month_mask(df_ncl)].copy()
+
+# Aggregate across selected months
+leads_total = int(pnc_view["Leads"].sum()) if not pnc_view.empty else 0
+pncs_total  = int(pnc_view["PNCs"].sum()) if not pnc_view.empty else 0
+
+retained_total             = int(ncl_view["Retained_Total"].sum()) if not ncl_view.empty else 0
+retained_with_consult      = int(ncl_view["Retained_With_Consult"].sum()) if not ncl_view.empty else 0
+retained_without_consult   = int(ncl_view["Retained_Without_Consult"].sum()) if not ncl_view.empty else 0
+
+# KPIs (some are placeholders until consult data source is defined)
+kpi_cols = st.columns(3)
+kpi_cols[0].metric("#Leads", f"{leads_total:,}")
+kpi_cols[1].metric("#PNCs", f"{pncs_total:,}")
+kpi_cols[2].metric("PNCs who retained without consult", f"{retained_without_consult:,}")
+
+kpi_cols2 = st.columns(3)
+# PNCs who scheduled consult — TBD (needs consult scheduling source)
+kpi_cols2[0].metric("PNCs who scheduled consult", "—")
+# % of remaining PNCs who scheduled consult — TBD until we have previous metric
+kpi_cols2[1].metric("% of remaining PNCs who scheduled consult", "—")
+# # of PNCs who showed up for consultation — TBD (awaiting consult report)
+kpi_cols2[2].metric("# of PNCs who showed up for consultation", "—")
+
+kpi_cols3 = st.columns(3)
+# $ of PNCs who scheduled consult showed up — if $ means count, we can change; else awaits revenue/fee input
+kpi_cols3[0].metric("# of PNCs who scheduled consult showed up", "—")
+kpi_cols3[1].metric("# of PNCs who retained after scheduled consult", f"{retained_with_consult:,}")
+# % of PNCs who retained after consult
+if retained_with_consult + retained_without_consult > 0:
+    pct_after_consult = (retained_with_consult / (retained_with_consult + retained_without_consult)) * 100.0
 else:
-    # ---- 1) Call Volume Trend Over Time ----
-    # Group by Month-Year and sum key call counts
-    vol = (view.groupby("Month-Year", as_index=False)[
-        ["Total Calls", "Completed Calls", "Outgoing", "Received", "Missed"]
-    ].sum())
+    pct_after_consult = 0.0
+kpi_cols3[2].metric("% of PNCs who retained after consult", f"{pct_after_consult:.1f}%")
 
-    # Order months correctly by turning Month-Year into a date
+kpi_cols4 = st.columns(2)
+kpi_cols4[0].metric("# of Total PNCs who retained", f"{retained_total:,}")
+if pncs_total > 0:
+    pct_total_retained = (retained_total / pncs_total) * 100.0
+else:
+    pct_total_retained = 0.0
+kpi_cols4[1].metric("% of Total PNCs who retained", f"{pct_total_retained:.1f}%")
+
+with st.expander("How these are calculated"):
+    st.markdown(
+        """
+- **#Leads**: count of rows in the Leads/PNCs file (all rows in Column A = leads).
+- **#PNCs**: leads **excluding** rows whose **Stage** is in your excluded list.
+- **PNCs who retained without consult**: from *New Client List*, count where **Retained With Consult (Y/N) = N**.
+- **# of Total PNCs who retained**: from *New Client List*, count of Y+N in **Retained With Consult (Y/N)**.
+- **% of Total PNCs who retained**: `(# total retained / #PNCs) × 100`.
+- The consult-scheduling/show-up metrics are placeholders until we connect the consult report.
+"""
+    )
+
+
+# =========================
+# 📊 Calls — Results table
+# =========================
+
+st.markdown("---")
+st.subheader("Calls — Results")
+calls_display_cols = [
+    "Category","Name","Total Calls","Completed Calls","Outgoing","Received",
+    "Forwarded to Voicemail","Answered by Other","Missed",
+    "Avg Call Time","Total Call Time","Total Hold Time","Month-Year"
+]
+st.dataframe(view_calls[calls_display_cols], hide_index=True, use_container_width=True)
+
+csv_buf = io.StringIO()
+view_calls[calls_display_cols].to_csv(csv_buf, index=False)
+st.download_button("Download filtered Calls CSV", csv_buf.getvalue(), file_name="call_report_filtered.csv", type="primary")
+
+
+# =========================
+# 📈 Calls — Visualizations (bottom)
+# =========================
+
+st.markdown("---")
+st.subheader("Calls — Visualizations")
+
+if view_calls.empty:
+    st.info("No data for the selected Calls filters.")
+else:
+    # 1) Volume trend
+    vol = (view_calls.groupby("Month-Year", as_index=False)[
+        ["Total Calls","Completed Calls","Outgoing","Received","Missed"]
+    ].sum())
     vol["_ym"] = pd.to_datetime(vol["Month-Year"] + "-01", format="%Y-%m-%d", errors="coerce")
     vol = vol.sort_values("_ym")
-
-    # Melt to long form for separate lines
-    vol_long = vol.melt(id_vars=["Month-Year", "_ym"],
-                        value_vars=["Total Calls", "Completed Calls", "Outgoing", "Received", "Missed"],
+    vol_long = vol.melt(id_vars=["Month-Year","_ym"],
+                        value_vars=["Total Calls","Completed Calls","Outgoing","Received","Missed"],
                         var_name="Metric", value_name="Count")
 
     with st.expander("📈 Call volume trend over time", expanded=True):
-        fig1 = px.line(
-            vol_long, x="_ym", y="Count", color="Metric",
-            markers=True,
-            labels={"_ym": "Month", "Count": "Calls"}
-        )
-        # Friendly x-axis labels
+        fig1 = px.line(vol_long, x="_ym", y="Count", color="Metric", markers=True,
+                       labels={"_ym":"Month","Count":"Calls"})
         fig1.update_layout(xaxis=dict(tickformat="%b %Y"))
         st.plotly_chart(fig1, use_container_width=True)
 
-    # ---- 2) Completion Rate by Staff ----
-    comp = (view.groupby("Name", as_index=False)[["Completed Calls", "Total Calls"]].sum())
+    # 2) Completion rate by staff
+    comp = (view_calls.groupby("Name", as_index=False)[["Completed Calls","Total Calls"]].sum())
     comp["Completion Rate (%)"] = comp.apply(
-        lambda r: (r["Completed Calls"] / r["Total Calls"] * 100.0) if r["Total Calls"] > 0 else 0.0,
-        axis=1
-    )
+        lambda r: (r["Completed Calls"]/r["Total Calls"]*100.0) if r["Total Calls"]>0 else 0.0, axis=1)
     comp = comp.sort_values("Completion Rate (%)", ascending=False)
 
     with st.expander("✅ Completion rate by staff", expanded=True):
-        fig2 = px.bar(
-            comp, x="Name", y="Completion Rate (%)",
-            labels={"Name": "Staff", "Completion Rate (%)": "Completion Rate (%)"}
-        )
-        fig2.update_layout(xaxis={'categoryorder': 'array', 'categoryarray': comp["Name"].tolist()})
+        fig2 = px.bar(comp, x="Name", y="Completion Rate (%)",
+                      labels={"Name":"Staff","Completion Rate (%)":"Completion Rate (%)"})
+        fig2.update_layout(xaxis={'categoryorder':'array','categoryarray':comp["Name"].tolist()})
         st.plotly_chart(fig2, use_container_width=True)
 
-    # ---- 3) Average Call Duration by Staff ----
-    # Weighted by Total Calls across the filtered set
-    dur = view.copy()
-    # Protect against division by zero
-    by_name = dur.groupby("Name", as_index=False).apply(
+    # 3) Average call duration by staff
+    by_name = view_calls.groupby("Name", as_index=False).apply(
         lambda g: pd.Series({
-            "Avg Seconds (weighted)": (g["__avg_sec"] * g["Total Calls"]).sum() / max(g["Total Calls"].sum(), 1)
+            "Avg Seconds (weighted)": (g["__avg_sec"]*g["Total Calls"]).sum()/max(g["Total Calls"].sum(),1)
         })
     )
-    by_name["Avg Minutes"] = by_name["Avg Seconds (weighted)"] / 60.0
+    by_name["Avg Minutes"] = by_name["Avg Seconds (weighted)"]/60.0
     by_name = by_name.sort_values("Avg Minutes", ascending=False)
 
     with st.expander("⏱️ Average call duration by staff (minutes)", expanded=True):
-        fig3 = px.bar(
-            by_name, x="Avg Minutes", y="Name", orientation="h",
-            labels={"Avg Minutes": "Minutes", "Name": "Staff"}
-        )
+        fig3 = px.bar(by_name, x="Avg Minutes", y="Name", orientation="h",
+                      labels={"Avg Minutes":"Minutes","Name":"Staff"})
         st.plotly_chart(fig3, use_container_width=True)
-
-with st.expander("Notes"):
-    st.markdown(
-        """
-- **Whitelisted Names only** are included in the report.
-- “**Riekie Van Ellinckhuyzen**” is displayed as “**Maria Van Ellinckhuyzen**”.
-- **Avg Call Time** is a **weighted average** by *Total Calls* across uploads within the same month.
-- **Upload period** must be within a single calendar month; upload multiple weekly CSVs for the same month to roll them up.
-- Nothing is saved to disk; data remains in session memory only.
-"""
-    )
