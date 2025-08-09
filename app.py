@@ -7,7 +7,7 @@
 #   2) Leads/PNCs (bucket by intake specialist; PNC logic)
 #   3) New Client List (retained Y/N)
 # - Top Block KPIs (Leads/PNCs + NCL)
-# - Calls table + 3 interactive charts (bottom)
+# - Calls table + 3 interactive charts (bottom; Plotly import guarded)
 # - No files written to disk
 # ---------------------------
 
@@ -20,8 +20,7 @@ import pandas as pd
 import streamlit as st
 import yaml
 import streamlit_authenticator as stauth
-import plotly.express as px
-
+# NOTE: Plotly import is intentionally deferred & guarded later.
 
 # =========================
 # 🔐 AUTHENTICATION (YAML in Secrets)
@@ -38,8 +37,12 @@ try:
         config.get("preauthorized", {}).get("emails", []),
     )
 
-    fields = {"Form name": "Login", "Username": "Username", "Password": "Password"}
-    name, auth_status, username = authenticator.login(fields=fields, location="main")
+    # Login compatibility shim
+    try:
+        name, auth_status, username = authenticator.login("Login", "main")
+    except TypeError:
+        fields = {"Form name": "Login", "Username": "Username", "Password": "Password"}
+        name, auth_status, username = authenticator.login(fields=fields, location="main")
 
     if auth_status is False:
         st.error("Username/password is incorrect"); st.stop()
@@ -226,7 +229,6 @@ def process_calls_csv(raw: pd.DataFrame, period_key: str) -> pd.DataFrame:
                 base = base + pd.to_numeric(df[c], errors="coerce").fillna(0)
             df[target] = base
 
-    # Examples: "Incoming Internal"/"Incoming External" → Received; "Outgoing Internal"/"Outgoing External" → Outgoing
     incoming_candidates = [c for c in raw.columns if norm(c) in {"incoming internal", "incoming external", "incoming"}]
     outgoing_candidates = [c for c in raw.columns if norm(c) in {"outgoing internal", "outgoing external", "outgoing"}]
     sum_if_present(incoming_candidates, "Received")
@@ -512,7 +514,7 @@ st.markdown("---")
 st.subheader("Top Block — Conversion KPIs")
 
 def month_mask(df: pd.DataFrame) -> pd.Series:
-    if df.empty: 
+    if df.empty:
         return pd.Series([], dtype=bool)
     m = pd.Series(True, index=df.index)
     if sel_year != "All":
@@ -543,7 +545,7 @@ kpi_cols2[1].metric("% of remaining PNCs who scheduled consult", "—")  # TBD
 kpi_cols2[2].metric("# of PNCs who showed up for consultation", "—")   # TBD
 
 kpi_cols3 = st.columns(3)
-kpi_cols3[0].metric("# of PNCs who scheduled consult showed up", "—")  # TBD / define "$"
+kpi_cols3[0].metric("# of PNCs who scheduled consult showed up", "—")  # TBD or define "$"
 kpi_cols3[1].metric("# of PNCs who retained after scheduled consult", f"{retained_with_consult:,}")
 if retained_with_consult + retained_without_consult > 0:
     pct_after_consult = (retained_with_consult / (retained_with_consult + retained_without_consult)) * 100.0
@@ -591,14 +593,25 @@ st.download_button("Download filtered Calls CSV", csv_buf.getvalue(), file_name=
 
 
 # =========================
-# 📈 Calls — Visualizations (bottom)
+# 📈 Calls — Visualizations (bottom; Plotly import guarded)
 # =========================
 
 st.markdown("---")
 st.subheader("Calls — Visualizations")
 
+# Guarded, deferred import so login never breaks if Plotly isn't installed
+try:
+    import plotly.express as px
+    plotly_ok = True
+except Exception:
+    plotly_ok = False
+    st.info("Charts are unavailable because Plotly isn’t installed. "
+            "Add `plotly>=5.22` to requirements.txt and restart the app.")
+
 if view_calls.empty:
     st.info("No data for the selected Calls filters.")
+elif not plotly_ok:
+    st.stop()
 else:
     # 1) Volume trend
     vol = (view_calls.groupby("Month-Year", as_index=False)[
