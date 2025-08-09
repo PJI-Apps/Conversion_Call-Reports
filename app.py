@@ -2,10 +2,10 @@
 # ---------------------------
 # Conversion Reports (Streamlit)
 # - Auth via streamlit-authenticator, YAML in Streamlit Secrets
-# - Three uploads (single-month date ranges, weekly uploads roll up monthly):
+# - Three uploads (single-month date ranges; weekly uploads roll up monthly):
 #   1) Zoom Calls (robust header mapping)
 #   2) Leads/PNCs (bucket by intake specialist; PNC logic)
-#   3) New Client List (retained Y/N)
+#   3) New Client List (retained Y/N; tolerant loader)
 # - Top Block KPIs (Leads/PNCs + NCL)
 # - Calls table + 3 interactive charts (bottom; Plotly import guarded)
 # - No files written to disk
@@ -103,14 +103,9 @@ EXCLUDED_PNC_STAGES = {
 }
 
 # =========================
-# 📋 CONSTANTS (NEW CLIENT LIST)
+# 📋 CONSTANTS (NEW CLIENT LIST) — minimal required
 # =========================
-EXPECTED_COLUMNS_NCL: List[str] = [
-    "Client Name","Practice Area","Matter Number/Link","Responsible Attorney",
-    "Retained With Consult (Y/N)","Date we had BOTH the signed CLA and full payment",
-    "Substantially related to existing matter?","Qualifies for bonus?",
-    "Primary Intake?","File open fee"
-]
+REQUIRED_COLUMNS_NCL: List[str] = ["Retained With Consult (Y/N)"]
 
 # =========================
 # 🧮 UTILITIES
@@ -162,7 +157,7 @@ def process_calls_csv(raw: pd.DataFrame, period_key: str) -> pd.DataFrame:
     rename_map, used = {}, set()
     for canonical, alts in synonyms.items():
         for actual, n in col_norm.items():
-            if actual in used: 
+            if actual in used:
                 continue
             if n in alts:
                 rename_map[actual] = canonical
@@ -170,7 +165,7 @@ def process_calls_csv(raw: pd.DataFrame, period_key: str) -> pd.DataFrame:
                 break
     df = raw.rename(columns=rename_map).copy()
 
-    # sum split inbound/outbound if present
+    # Sum split inbound/outbound if present
     def sum_if_present(cols, target):
         present = [c for c in cols if c in df.columns]
         if present:
@@ -251,16 +246,56 @@ def process_pnc_csv(raw: pd.DataFrame, period_key: str) -> pd.DataFrame:
     return agg
 
 def process_ncl_csv(raw: pd.DataFrame, period_key: str) -> pd.DataFrame:
+    # Tolerant loader: only requires "Retained With Consult (Y/N)" (with synonyms)
+    def norm(s: str) -> str:
+        s = s.strip().lower()
+        s = re.sub(r"[\s_]+", " ", s)
+        s = re.sub(r"[^a-z0-9 ?/()]+", "", s)
+        return s
+
     raw.columns = [c.strip() for c in raw.columns]
-    missing = [c for c in EXPECTED_COLUMNS_NCL if c not in raw.columns]
+    col_norm = {c: norm(c) for c in raw.columns}
+
+    synonyms = {
+        "Retained With Consult (Y/N)": [
+            "retained with consult (y/n)", "retained with consult y/n", "retained with consult",
+            "retained (y/n)", "retained?", "retained", "retained status",
+            "retained with consultation", "retained with consult? (y/n)"
+        ]
+    }
+
+    rename_map, used = {}, set()
+    for canonical, alts in synonyms.items():
+        for actual, n in col_norm.items():
+            if actual in used: 
+                continue
+            if n in alts:
+                rename_map[actual] = canonical
+                used.add(actual)
+                break
+
+    df = raw.rename(columns=rename_map).copy()
+
+    missing = [c for c in REQUIRED_COLUMNS_NCL if c not in df.columns]
     if missing:
-        raise ValueError(f"New Client List CSV is missing columns: {missing}")
-    df = raw.copy()
+        st.error("New Client List headers detected: " + ", ".join(list(raw.columns)))
+        raise ValueError(f"New Client List CSV is missing columns after normalization: {missing}")
+
     df["Month-Year"] = period_key
+
+    # Normalize Y/N (accept common truthy/falsey strings)
+    def yes_count(s: pd.Series) -> int:
+        v = s.astype(str).str.strip().str.upper()
+        return int(v.isin({"Y","YES","TRUE","T","1"}).sum())
+
+    def no_count(s: pd.Series) -> int:
+        v = s.astype(str).str.strip().str.upper()
+        return int(v.isin({"N","NO","FALSE","F","0"}).sum())
+
     agg = df.groupby("Month-Year", as_index=False).agg(
         Retained_Total=("Retained With Consult (Y/N)", lambda s: s.notna().sum()),
-        Retained_With_Consult=("Retained With Consult (Y/N)", lambda s: (s.astype(str).str.upper()=="Y").sum()),
-        Retained_Without_Consult=("Retained With Consult (Y/N)", lambda s: (s.astype(str).str.upper()=="N").sum()),
+        Retained_With_Consult=("Retained With Consult (Y/N)", yes_count),
+        Retained_Without_Consult=("Retained With Consult (Y/N)", no_count),
     )
     return agg
 
@@ -290,7 +325,7 @@ def upload_section(section_id: str, title: str) -> Tuple[str, object]:
     st.divider()
     return period_key, uploaded
 
-# session state holders
+# Session state holders
 for k in ["batches_calls","batches_pnc","batches_ncl"]:
     if k not in st.session_state:
         st.session_state[k] = []
@@ -490,6 +525,7 @@ if view_calls.empty:
 elif not plotly_ok:
     st.stop()
 else:
+    # 1) Volume trend
     vol = (view_calls.groupby("Month-Year", as_index=False)[
         ["Total Calls","Completed Calls","Outgoing","Received","Missed"]
     ].sum())
@@ -505,9 +541,10 @@ else:
         fig1.update_layout(xaxis=dict(tickformat="%b %Y"))
         st.plotly_chart(fig1, use_container_width=True)
 
+    # 2) Completion rate by staff
     comp = (view_calls.groupby("Name", as_index=False)[["Completed Calls","Total Calls"]].sum())
-    comp["Completion Rate (%)"] = comp.apply(lambda r: (r["Completed Calls"]/r["Total Calls"]*100.0)
-                                             if r["Total Calls"]>0 else 0.0, axis=1)
+    comp["Completion Rate (%)"] = comp.apply(
+        lambda r: (r["Completed Calls"]/r["Total Calls"]*100.0) if r["Total Calls"]>0 else 0.0, axis=1)
     comp = comp.sort_values("Completion Rate (%)", ascending=False)
     with st.expander("✅ Completion rate by staff", expanded=True):
         fig2 = px.bar(comp, x="Name", y="Completion Rate (%)",
@@ -515,6 +552,7 @@ else:
         fig2.update_layout(xaxis={'categoryorder':'array','categoryarray':comp["Name"].tolist()})
         st.plotly_chart(fig2, use_container_width=True)
 
+    # 3) Average call duration by staff
     by_name = view_calls.groupby("Name", as_index=False).apply(
         lambda g: pd.Series({"Avg Seconds (weighted)": (g["__avg_sec"]*g["Total Calls"]).sum()/max(g["Total Calls"].sum(),1)})
     )
