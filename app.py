@@ -419,35 +419,80 @@ df_ncl = pd.concat(st.session_state["batches_ncl"], ignore_index=True) if st.ses
 # =========================
 # 🔎 FILTERS (CALLS ONLY)
 # =========================
-st.subheader("Filters (Calls)")
+st.subheader("Filters (Reporting Period + Calls)")
+
 def with_all(options): return ["All"] + sorted(options)
 
-c1, c2, c3, c4 = st.columns(4)
-years = sorted({int(m.split("-")[0]) for m in df_calls["Month-Year"].unique()}) if not df_calls.empty else []
-sel_year = c1.selectbox("Year", with_all(years) if years else ["All"], index=0)
+# Build the month list from ALL datasets (calls, pnc, ncl)
+def union_months_from(*dfs):
+    months = set()
+    for d in dfs:
+        if isinstance(d, pd.DataFrame) and not d.empty and "Month-Year" in d.columns:
+            months |= set(d["Month-Year"].dropna().astype(str))
+    return sorted(months)
 
-months_map = {"01":"January","02":"February","03":"March","04":"April","05":"May","06":"June",
-              "07":"July","08":"August","09":"September","10":"October","11":"November","12":"December"}
-months_available = sorted({m.split("-")[1] for m in df_calls["Month-Year"].unique()}) if not df_calls.empty else []
-month_names_available = [months_map[m] for m in months_available] if months_available else []
-sel_month_name = c2.selectbox("Month", ["All"] + month_names_available, index=0)
+all_months = union_months_from(df_calls, df_pnc, df_ncl)
 
+# Helpers to format/display
+months_map = {
+    "01":"January","02":"February","03":"March","04":"April","05":"May","06":"June",
+    "07":"July","08":"August","09":"September","10":"October","11":"November","12":"December"
+}
+def month_num_to_name(mnum): return months_map.get(mnum, mnum)
+
+# Default to the latest month we have anywhere (instead of "All")
+if all_months:
+    latest_my = max(all_months)  # "YYYY-MM" compares correctly as string
+    latest_year, latest_mnum = latest_my.split("-")
+    latest_mname = month_num_to_name(latest_mnum)
+else:
+    latest_year, latest_mname = "All", "All"
+
+# Year selectbox (from ALL datasets)
+years = sorted({m.split("-")[0] for m in all_months})
+year_options = ["All"] + years
+default_year_index = year_options.index(latest_year) if latest_year in year_options else 0
+col1, col2, col3, col4 = st.columns(4)
+sel_year = col1.selectbox("Year", year_options, index=default_year_index)
+
+# Month selectbox depends on selected year (still from ALL datasets)
+def months_for_year(year_sel: str):
+    if year_sel == "All":
+        return sorted({m.split("-")[1] for m in all_months})
+    return sorted({m.split("-")[1] for m in all_months if m.startswith(year_sel)})
+
+mnums = months_for_year(sel_year)
+mnames = [month_num_to_name(m) for m in mnums]
+month_options = ["All"] + mnames
+default_month_index = month_options.index(latest_mname) if latest_mname in month_options else 0
+sel_month_name = col2.selectbox("Month", month_options, index=default_month_index)
+
+# Category & Name filters (same as before)
 cat_choices = with_all(df_calls["Category"].unique().tolist()) if not df_calls.empty else ["All"]
-sel_cat = c3.selectbox("Category", cat_choices, index=0)
-
+sel_cat = col3.selectbox("Category", cat_choices, index=0)
 base = df_calls if sel_cat == "All" else df_calls[df_calls["Category"] == sel_cat]
 name_choices = with_all(base["Name"].unique().tolist()) if not base.empty else ["All"]
-sel_name = c4.selectbox("Name", name_choices, index=0)
+sel_name = col4.selectbox("Name", name_choices, index=0)
 
-mask_calls = pd.Series(True, index=df_calls.index)
-if sel_year != "All": mask_calls &= df_calls["Month-Year"].str.startswith(str(sel_year))
-if sel_month_name != "All":
-    month_num = [k for k,v in months_map.items() if v == sel_month_name][0]
-    mask_calls &= df_calls["Month-Year"].str.endswith(month_num)
-if sel_cat != "All": mask_calls &= df_calls["Category"] == sel_cat
+# Build masks using the unified period selection
+def period_mask(df: pd.DataFrame) -> pd.Series:
+    if df.empty: return pd.Series([], dtype=bool)
+    m = pd.Series(True, index=df.index)
+    if sel_year != "All":
+        m &= df["Month-Year"].str.startswith(sel_year)
+    if sel_month_name != "All":
+        # find numeric month from the name
+        month_num = next((k for k,v in months_map.items() if v == sel_month_name), None)
+        if month_num:
+            m &= df["Month-Year"].str.endswith(month_num)
+    return m
+
+# Apply to Calls view
+mask_calls = period_mask(df_calls)
+if sel_cat != "All":  mask_calls &= df_calls["Category"] == sel_cat
 if sel_name != "All": mask_calls &= df_calls["Name"] == sel_name
-
 view_calls = df_calls.loc[mask_calls].copy()
+
 
 # =========================
 # 🧮 TOP BLOCK (Leads/PNCs + NCL)
@@ -456,13 +501,8 @@ st.markdown("---")
 st.subheader("Top Block — Conversion KPIs")
 
 def month_mask(df: pd.DataFrame) -> pd.Series:
-    if df.empty: return pd.Series([], dtype=bool)
-    m = pd.Series(True, index=df.index)
-    if sel_year != "All": m &= df["Month-Year"].str.startswith(str(sel_year))
-    if sel_month_name != "All":
-        mnum = [k for k,v in months_map.items() if v == sel_month_name][0]
-        m &= df["Month-Year"].str.endswith(mnum)
-    return m
+    return period_mask(df)
+
 
 pnc_view = df_pnc.loc[month_mask(df_pnc)].copy()
 ncl_view = df_ncl.loc[month_mask(df_ncl)].copy()
