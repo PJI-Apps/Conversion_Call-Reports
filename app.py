@@ -27,8 +27,10 @@ import streamlit_authenticator as stauth
 # =========================
 st.set_page_config(page_title="Conversion Reports", page_icon="☎️", layout="wide")
 
+# Load config from secrets and gate the app
 try:
     config = yaml.safe_load(st.secrets["auth_config"]["config"])
+
     authenticator = stauth.Authenticate(
         config["credentials"],
         config["cookie"]["name"],
@@ -37,12 +39,9 @@ try:
         config.get("preauthorized", {}).get("emails", []),
     )
 
-    # Login compatibility shim
-    try:
-        name, auth_status, username = authenticator.login("Login", "main")
-    except TypeError:
-        fields = {"Form name": "Login", "Username": "Username", "Password": "Password"}
-        name, auth_status, username = authenticator.login(fields=fields, location="main")
+    # ✅ Use the modern API (fields=...) only
+    fields = {"Form name": "Login", "Username": "Username", "Password": "Password"}
+    name, auth_status, username = authenticator.login(fields=fields, location="main")
 
     if auth_status is False:
         st.error("Username/password is incorrect"); st.stop()
@@ -52,6 +51,7 @@ try:
         with st.sidebar:
             authenticator.logout("Logout", "sidebar")
             st.caption(f"Signed in as **{name}**")
+
 except Exception as e:
     st.error("Authentication is not configured correctly. Check your **Secrets**.")
     st.exception(e); st.stop()
