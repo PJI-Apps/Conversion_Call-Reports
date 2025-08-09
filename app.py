@@ -299,30 +299,46 @@ df_all = pd.concat(batches, ignore_index=True)
 st.subheader("Filters")
 
 def with_all(options):
+    """Return sorted list with 'All' prepended."""
     return ["All"] + sorted(options)
 
-col1, col2, col3 = st.columns(3)
+col1, col2, col3, col4 = st.columns(4)
 
-with col1:
-    month_choices = sorted(df_all["Month-Year"].unique().tolist())
-    # keep Month-Year as multiselect (handy for comparisons). If you want a picklist too, say the word.
-    sel_months = st.multiselect("Month-Year", month_choices, default=month_choices)
+# --- Year picklist ---
+years = sorted({int(m.split("-")[0]) for m in df_all["Month-Year"].unique()})
+sel_year = col1.selectbox("Year", with_all(years), index=0)
 
-with col2:
-    cat_choices = with_all(df_all["Category"].unique().tolist())
-    sel_cat = st.selectbox("Category", cat_choices, index=0)  # default "All"
+# --- Month picklist ---
+months_map = {
+    "01": "January", "02": "February", "03": "March", "04": "April",
+    "05": "May", "06": "June", "07": "July", "08": "August",
+    "09": "September", "10": "October", "11": "November", "12": "December"
+}
+months_available = sorted({m.split("-")[1] for m in df_all["Month-Year"].unique()})
+month_names_available = [months_map[m] for m in months_available]
+sel_month_name = col2.selectbox("Month", ["All"] + month_names_available, index=0)
 
-with col3:
-    # Limit name options by selected category (unless All)
-    if sel_cat == "All":
-        base = df_all
-    else:
-        base = df_all[df_all["Category"] == sel_cat]
-    name_choices = with_all(base["Name"].unique().tolist())
-    sel_name = st.selectbox("Name", name_choices, index=0)  # default "All"
+# --- Category picklist ---
+cat_choices = with_all(df_all["Category"].unique().tolist())
+sel_cat = col3.selectbox("Category", cat_choices, index=0)
+
+# --- Name picklist (depends on category) ---
+if sel_cat == "All":
+    base = df_all
+else:
+    base = df_all[df_all["Category"] == sel_cat]
+name_choices = with_all(base["Name"].unique().tolist())
+sel_name = col4.selectbox("Name", name_choices, index=0)
 
 # Build mask
-mask = df_all["Month-Year"].isin(sel_months)
+mask = pd.Series(True, index=df_all.index)
+
+if sel_year != "All":
+    mask &= df_all["Month-Year"].str.startswith(str(sel_year))
+
+if sel_month_name != "All":
+    month_num = [k for k, v in months_map.items() if v == sel_month_name][0]
+    mask &= df_all["Month-Year"].str.endswith(month_num)
 
 if sel_cat != "All":
     mask &= df_all["Category"] == sel_cat
@@ -331,6 +347,7 @@ if sel_name != "All":
     mask &= df_all["Name"] == sel_name
 
 view = df_all.loc[mask].copy()
+
 
 
 # Download filtered CSV (memory only)
