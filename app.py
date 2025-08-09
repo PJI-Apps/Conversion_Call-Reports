@@ -5,7 +5,7 @@
 # - Three uploads (single-month date ranges; weekly uploads roll up monthly):
 #   1) Zoom Calls (robust header mapping)
 #   2) Leads/PNCs (bucket by intake specialist; PNC logic)
-#   3) New Client List (retained Y/N; tolerant loader)
+#   3) New Client List (retained Y/N; tolerant loader with fallback)
 # - Top Block KPIs (Leads/PNCs + NCL)
 # - Calls table + 3 interactive charts (bottom; Plotly import guarded)
 # - No files written to disk
@@ -103,9 +103,10 @@ EXCLUDED_PNC_STAGES = {
 }
 
 # =========================
-# 📋 CONSTANTS (NEW CLIENT LIST) — minimal required
+# 📋 CONSTANTS (NEW CLIENT LIST) — tolerant
 # =========================
-REQUIRED_COLUMNS_NCL: List[str] = ["Retained With Consult (Y/N)"]
+# Only needed if present; otherwise we fall back to total-row counting.
+NCL_FLAG_CANON = "Retained With Consult (Y/N)"
 
 # =========================
 # 🧮 UTILITIES
@@ -173,8 +174,10 @@ def process_calls_csv(raw: pd.DataFrame, period_key: str) -> pd.DataFrame:
             for c in present:
                 base = base + pd.to_numeric(df[c], errors="coerce").fillna(0)
             df[target] = base
-    incoming = [c for c in raw.columns if norm(c) in {"incoming internal","incoming external","incoming"}]
-    outgoing = [c for c in raw.columns if norm(c) in {"outgoing internal","outgoing external","outgoing"}]
+    def norm2(s: str) -> str:
+        return re.sub(r"[^a-z0-9 ]","",re.sub(r"[\s_]+"," ",s.strip().lower()))
+    incoming = [c for c in raw.columns if norm2(c) in {"incoming internal","incoming external","incoming"}]
+    outgoing = [c for c in raw.columns if norm2(c) in {"outgoing internal","outgoing external","outgoing"}]
     sum_if_present(incoming, "Received")
     sum_if_present(outgoing, "Outgoing")
 
@@ -246,7 +249,7 @@ def process_pnc_csv(raw: pd.DataFrame, period_key: str) -> pd.DataFrame:
     return agg
 
 def process_ncl_csv(raw: pd.DataFrame, period_key: str) -> pd.DataFrame:
-    # Tolerant loader: only requires "Retained With Consult (Y/N)" (with synonyms)
+    """Tolerant loader. If 'Retained With Consult (Y/N)' is missing, we still compute total retained."""
     def norm(s: str) -> str:
         s = s.strip().lower()
         s = re.sub(r"[\s_]+", " ", s)
@@ -256,8 +259,9 @@ def process_ncl_csv(raw: pd.DataFrame, period_key: str) -> pd.DataFrame:
     raw.columns = [c.strip() for c in raw.columns]
     col_norm = {c: norm(c) for c in raw.columns}
 
+    # Synonyms for the consult flag
     synonyms = {
-        "Retained With Consult (Y/N)": [
+        NCL_FLAG_CANON: [
             "retained with consult (y/n)", "retained with consult y/n", "retained with consult",
             "retained (y/n)", "retained?", "retained", "retained status",
             "retained with consultation", "retained with consult? (y/n)"
@@ -267,7 +271,7 @@ def process_ncl_csv(raw: pd.DataFrame, period_key: str) -> pd.DataFrame:
     rename_map, used = {}, set()
     for canonical, alts in synonyms.items():
         for actual, n in col_norm.items():
-            if actual in used: 
+            if actual in used:
                 continue
             if n in alts:
                 rename_map[actual] = canonical
@@ -275,28 +279,38 @@ def process_ncl_csv(raw: pd.DataFrame, period_key: str) -> pd.DataFrame:
                 break
 
     df = raw.rename(columns=rename_map).copy()
-
-    missing = [c for c in REQUIRED_COLUMNS_NCL if c not in df.columns]
-    if missing:
-        st.error("New Client List headers detected: " + ", ".join(list(raw.columns)))
-        raise ValueError(f"New Client List CSV is missing columns after normalization: {missing}")
-
     df["Month-Year"] = period_key
 
-    # Normalize Y/N (accept common truthy/falsey strings)
-    def yes_count(s: pd.Series) -> int:
-        v = s.astype(str).str.strip().str.upper()
-        return int(v.isin({"Y","YES","TRUE","T","1"}).sum())
+    has_flag = NCL_FLAG_CANON in df.columns
 
-    def no_count(s: pd.Series) -> int:
-        v = s.astype(str).str.strip().str.upper()
-        return int(v.isin({"N","NO","FALSE","F","0"}).sum())
+    if has_flag:
+        def yes_count(s: pd.Series) -> int:
+            v = s.astype(str).str.strip().str.upper()
+            return int(v.isin({"Y","YES","TRUE","T","1"}).sum())
+        def no_count(s: pd.Series) -> int:
+            v = s.astype(str).str.strip().str.upper()
+            return int(v.isin({"N","NO","FALSE","F","0"}).sum())
 
-    agg = df.groupby("Month-Year", as_index=False).agg(
-        Retained_Total=("Retained With Consult (Y/N)", lambda s: s.notna().sum()),
-        Retained_With_Consult=("Retained With Consult (Y/N)", yes_count),
-        Retained_Without_Consult=("Retained With Consult (Y/N)", no_count),
-    )
+        agg = df.groupby("Month-Year", as_index=False).agg(
+            Retained_Total=(NCL_FLAG_CANON, lambda s: s.notna().sum()),
+            Retained_With_Consult=(NCL_FLAG_CANON, yes_count),
+            Retained_Without_Consult=(NCL_FLAG_CANON, no_count),
+        )
+        agg["HasConsultSplit"] = True
+    else:
+        # Fallback: count rows that look like valid clients
+        if "Client Name" in df.columns:
+            total = df["Client Name"].astype(str).str.strip().replace({"": None}).notna().sum()
+        else:
+            total = len(df.dropna(how="all"))
+        agg = pd.DataFrame({
+            "Month-Year": [period_key],
+            "Retained_Total": [int(total)],
+            "Retained_With_Consult": [pd.NA],
+            "Retained_Without_Consult": [pd.NA],
+            "HasConsultSplit": [False],
+        })
+
     return agg
 
 # =========================
@@ -305,8 +319,7 @@ def process_ncl_csv(raw: pd.DataFrame, period_key: str) -> pd.DataFrame:
 st.title("Conversion Reports")
 
 def upload_section(section_id: str, title: str) -> Tuple[str, object]:
-    """Render a clean section with a same-month date range and uploader.
-       Returns (period_key, uploaded_file or None). Keys are safe & unique."""
+    """Render a clean section with a same-month date range and uploader."""
     st.subheader(title)
     today = dt.date.today()
     first_of_month = today.replace(day=1)
@@ -357,7 +370,10 @@ if ncl_uploader:
         raw = pd.read_csv(ncl_uploader)
         processed = process_ncl_csv(raw, ncl_period_key)
         st.session_state["batches_ncl"].append(processed)
-        st.success(f"New Client List: loaded retained totals for {ncl_period_key}.")
+        if bool(processed.get("HasConsultSplit", pd.Series([False])).any()):
+            st.success(f"New Client List: loaded totals + consult split for {ncl_period_key}.")
+        else:
+            st.warning(f"New Client List: loaded totals for {ncl_period_key} (consult split column not found).")
     except Exception as e:
         st.error("Could not parse New Client List CSV."); st.exception(e)
 
@@ -397,8 +413,8 @@ else:
 
 # Leads/PNCs
 df_pnc = pd.concat(st.session_state["batches_pnc"], ignore_index=True) if st.session_state["batches_pnc"] else pd.DataFrame(columns=["Month-Year","Intake Bucket","Leads","PNCs"])
-# New Client List
-df_ncl = pd.concat(st.session_state["batches_ncl"], ignore_index=True) if st.session_state["batches_ncl"] else pd.DataFrame(columns=["Month-Year","Retained_Total","Retained_With_Consult","Retained_Without_Consult"])
+# New Client List (note the extra column)
+df_ncl = pd.concat(st.session_state["batches_ncl"], ignore_index=True) if st.session_state["batches_ncl"] else pd.DataFrame(columns=["Month-Year","Retained_Total","Retained_With_Consult","Retained_Without_Consult","HasConsultSplit"])
 
 # =========================
 # 🔎 FILTERS (CALLS ONLY)
@@ -453,40 +469,50 @@ ncl_view = df_ncl.loc[month_mask(df_ncl)].copy()
 
 leads_total = int(pnc_view["Leads"].sum()) if not pnc_view.empty else 0
 pncs_total  = int(pnc_view["PNCs"].sum()) if not pnc_view.empty else 0
-retained_total = int(ncl_view["Retained_Total"].sum()) if not ncl_view.empty else 0
-retained_with_consult = int(ncl_view["Retained_With_Consult"].sum()) if not ncl_view.empty else 0
-retained_without_consult = int(ncl_view["Retained_Without_Consult"].sum()) if not ncl_view.empty else 0
+
+retained_total = int(ncl_view["Retained_Total"].fillna(0).sum()) if not ncl_view.empty else 0
+consult_known  = bool(ncl_view.get("HasConsultSplit", pd.Series([False])).any())
+retained_with_consult    = int(ncl_view["Retained_With_Consult"].fillna(0).sum()) if consult_known else None
+retained_without_consult = int(ncl_view["Retained_Without_Consult"].fillna(0).sum()) if consult_known else None
 
 k1,k2,k3 = st.columns(3)
 k1.metric("#Leads", f"{leads_total:,}")
 k2.metric("#PNCs", f"{pncs_total:,}")
-k3.metric("PNCs who retained without consult", f"{retained_without_consult:,}")
+k3.metric("PNCs who retained without consult", "—" if not consult_known else f"{retained_without_consult:,}")
 
 k4,k5,k6 = st.columns(3)
-k4.metric("PNCs who scheduled consult", "—")
+k4.metric("PNCs who scheduled consult", "—")  # pending consult data
 k5.metric("% of remaining PNCs who scheduled consult", "—")
 k6.metric("# of PNCs who showed up for consultation", "—")
 
 k7,k8,k9 = st.columns(3)
 k7.metric("# of PNCs who scheduled consult showed up", "—")
-k8.metric("# of PNCs who retained after scheduled consult", f"{retained_with_consult:,}")
-pct_after_consult = (retained_with_consult/(retained_with_consult+retained_without_consult)*100.0) if (retained_with_consult+retained_without_consult)>0 else 0.0
-k9.metric("% of PNCs who retained after consult", f"{pct_after_consult:.1f}%")
+k8.metric("# of PNCs who retained after scheduled consult", "—" if not consult_known else f"{retained_with_consult:,}")
+if consult_known and (retained_with_consult + retained_without_consult) > 0:
+    pct_after_consult = (retained_with_consult / (retained_with_consult + retained_without_consult)) * 100.0
+    pct_after_consult_str = f"{pct_after_consult:.1f}%"
+else:
+    pct_after_consult_str = "—"
+k9.metric("% of PNCs who retained after consult", pct_after_consult_str)
 
 k10,k11 = st.columns(2)
 k10.metric("# of Total PNCs who retained", f"{retained_total:,}")
 pct_total_retained = (retained_total/pncs_total*100.0) if pncs_total>0 else 0.0
 k11.metric("% of Total PNCs who retained", f"{pct_total_retained:.1f}%")
 
+if not consult_known and not ncl_view.empty:
+    st.info("Your New Client List doesn’t include a ‘Retained With Consult (Y/N)’ column. "
+            "We’re showing total retained only; consult split metrics are unavailable for these uploads.")
+
 with st.expander("How these are calculated"):
     st.markdown(
         """
 - **#Leads**: count of rows in the Leads/PNCs file (all rows in Column A = leads).
 - **#PNCs**: leads **excluding** rows whose **Stage** is in your excluded list.
-- **PNCs who retained without consult**: from *New Client List*, count where **Retained With Consult (Y/N) = N**.
-- **# of Total PNCs who retained**: from *New Client List*, count of Y+N in **Retained With Consult (Y/N)**.
+- **PNCs who retained without consult** / **after consult**: from *New Client List* **only when** a “Retained With Consult (Y/N)” column is present.
+- **# of Total PNCs who retained**: from *New Client List*, row count (or Y+N when the column exists).
 - **% of Total PNCs who retained**: `(# total retained / #PNCs) × 100`.
-- The consult-scheduling/show-up metrics are placeholders until we connect the consult report.
+- Consult scheduling/show-up metrics are placeholders until we connect the consult report.
 """
     )
 
