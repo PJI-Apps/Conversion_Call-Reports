@@ -297,34 +297,41 @@ df_all = pd.concat(batches, ignore_index=True)
 
 # Filters
 st.subheader("Filters")
+
+def with_all(options):
+    return ["All"] + sorted(options)
+
 col1, col2, col3 = st.columns(3)
 
 with col1:
     month_choices = sorted(df_all["Month-Year"].unique().tolist())
+    # keep Month-Year as multiselect (handy for comparisons). If you want a picklist too, say the word.
     sel_months = st.multiselect("Month-Year", month_choices, default=month_choices)
 
 with col2:
-    cat_choices = sorted(df_all["Category"].unique().tolist())
-    sel_cats = st.multiselect("Category", cat_choices, default=cat_choices)
+    cat_choices = with_all(df_all["Category"].unique().tolist())
+    sel_cat = st.selectbox("Category", cat_choices, index=0)  # default "All"
 
 with col3:
-    name_choices = sorted(df_all["Name"].unique().tolist())
-    sel_names = st.multiselect("Name", name_choices, default=name_choices)
+    # Limit name options by selected category (unless All)
+    if sel_cat == "All":
+        base = df_all
+    else:
+        base = df_all[df_all["Category"] == sel_cat]
+    name_choices = with_all(base["Name"].unique().tolist())
+    sel_name = st.selectbox("Name", name_choices, index=0)  # default "All"
 
-mask = (
-    df_all["Month-Year"].isin(sel_months)
-    & df_all["Category"].isin(sel_cats)
-    & df_all["Name"].isin(sel_names)
-)
+# Build mask
+mask = df_all["Month-Year"].isin(sel_months)
+
+if sel_cat != "All":
+    mask &= df_all["Category"] == sel_cat
+
+if sel_name != "All":
+    mask &= df_all["Name"] == sel_name
 
 view = df_all.loc[mask].copy()
 
-st.subheader("Results")
-st.dataframe(
-    view[OUT_COLUMNS],
-    hide_index=True,
-    use_container_width=True,
-)
 
 # Download filtered CSV (memory only)
 csv_buf = io.StringIO()
