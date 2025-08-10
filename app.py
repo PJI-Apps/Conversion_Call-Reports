@@ -542,7 +542,7 @@ df_ncl["Date we had BOTH the signed CLA and full payment"] = _to_dt(
 # Count First Name except Stage == "Marketing/Scam/Spam (Non-Lead)"
 # -------------------------
 row1 = int(df_leads.loc[
-    df_leads["Stage"].astype(str).str.strip() != "Marketing/Scam/Spam (Non-Lead"),
+    df_leads["Stage"].astype(str).str.strip() != "Marketing/Scam/Spam (Non-Lead)",
     "First Name"
 ].shape[0])
 
