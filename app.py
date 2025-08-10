@@ -6,6 +6,7 @@
 #   1) Zoom Calls (robust header mapping)
 #   2) Leads/PNCs (bucket by intake specialist; PNC logic)
 #   3) New Client List (retained Y/N; tolerant loader with fallback)
+# - Unified reporting-period filter (Month/Year) applied to ALL datasets (Calls, PNC, NCL)
 # - Top Block KPIs (Leads/PNCs + NCL)
 # - Calls table + 3 interactive charts (bottom; Plotly import guarded)
 # - No files written to disk
@@ -20,7 +21,7 @@ import pandas as pd
 import streamlit as st
 import yaml
 import streamlit_authenticator as stauth
-# plotly import is deferred + guarded later
+# Plotly import is deferred + guarded later
 
 # =========================
 # 🔐 AUTHENTICATION
@@ -105,8 +106,7 @@ EXCLUDED_PNC_STAGES = {
 # =========================
 # 📋 CONSTANTS (NEW CLIENT LIST) — tolerant
 # =========================
-# Only needed if present; otherwise we fall back to total-row counting.
-NCL_FLAG_CANON = "Retained With Consult (Y/N)"
+NCL_FLAG_CANON = "Retained With Consult (Y/N)"  # optional; we fall back if absent
 
 # =========================
 # 🧮 UTILITIES
@@ -259,7 +259,6 @@ def process_ncl_csv(raw: pd.DataFrame, period_key: str) -> pd.DataFrame:
     raw.columns = [c.strip() for c in raw.columns]
     col_norm = {c: norm(c) for c in raw.columns}
 
-    # Synonyms for the consult flag
     synonyms = {
         NCL_FLAG_CANON: [
             "retained with consult (y/n)", "retained with consult y/n", "retained with consult",
@@ -413,17 +412,16 @@ else:
 
 # Leads/PNCs
 df_pnc = pd.concat(st.session_state["batches_pnc"], ignore_index=True) if st.session_state["batches_pnc"] else pd.DataFrame(columns=["Month-Year","Intake Bucket","Leads","PNCs"])
-# New Client List (note the extra column)
+# New Client List
 df_ncl = pd.concat(st.session_state["batches_ncl"], ignore_index=True) if st.session_state["batches_ncl"] else pd.DataFrame(columns=["Month-Year","Retained_Total","Retained_With_Consult","Retained_Without_Consult","HasConsultSplit"])
 
 # =========================
-# 🔎 FILTERS (CALLS ONLY)
+# 🔎 UNIFIED REPORTING-PERIOD FILTER (applies to ALL datasets)
 # =========================
-st.subheader("Filters (Reporting Period + Calls)")
+st.subheader("Filters — Reporting Period + Calls")
 
 def with_all(options): return ["All"] + sorted(options)
 
-# Build the month list from ALL datasets (calls, pnc, ncl)
 def union_months_from(*dfs):
     months = set()
     for d in dfs:
@@ -433,29 +431,26 @@ def union_months_from(*dfs):
 
 all_months = union_months_from(df_calls, df_pnc, df_ncl)
 
-# Helpers to format/display
 months_map = {
     "01":"January","02":"February","03":"March","04":"April","05":"May","06":"June",
     "07":"July","08":"August","09":"September","10":"October","11":"November","12":"December"
 }
 def month_num_to_name(mnum): return months_map.get(mnum, mnum)
 
-# Default to the latest month we have anywhere (instead of "All")
 if all_months:
-    latest_my = max(all_months)  # "YYYY-MM" compares correctly as string
+    latest_my = max(all_months)  # "YYYY-MM"
     latest_year, latest_mnum = latest_my.split("-")
     latest_mname = month_num_to_name(latest_mnum)
 else:
     latest_year, latest_mname = "All", "All"
 
-# Year selectbox (from ALL datasets)
 years = sorted({m.split("-")[0] for m in all_months})
 year_options = ["All"] + years
 default_year_index = year_options.index(latest_year) if latest_year in year_options else 0
-col1, col2, col3, col4 = st.columns(4)
-sel_year = col1.selectbox("Year", year_options, index=default_year_index)
 
-# Month selectbox depends on selected year (still from ALL datasets)
+col1, col2, col3, col4 = st.columns(4)
+sel_year = col1.selectbox("Year", year_options if year_options else ["All"], index=default_year_index)
+
 def months_for_year(year_sel: str):
     if year_sel == "All":
         return sorted({m.split("-")[1] for m in all_months})
@@ -463,57 +458,53 @@ def months_for_year(year_sel: str):
 
 mnums = months_for_year(sel_year)
 mnames = [month_num_to_name(m) for m in mnums]
-month_options = ["All"] + mnames
+month_options = ["All"] + mnames if mnames else ["All"]
 default_month_index = month_options.index(latest_mname) if latest_mname in month_options else 0
 sel_month_name = col2.selectbox("Month", month_options, index=default_month_index)
 
-# Category & Name filters (same as before)
+# Category & Name filters (Calls)
 cat_choices = with_all(df_calls["Category"].unique().tolist()) if not df_calls.empty else ["All"]
 sel_cat = col3.selectbox("Category", cat_choices, index=0)
 base = df_calls if sel_cat == "All" else df_calls[df_calls["Category"] == sel_cat]
 name_choices = with_all(base["Name"].unique().tolist()) if not base.empty else ["All"]
 sel_name = col4.selectbox("Name", name_choices, index=0)
 
-# Build masks using the unified period selection
 def period_mask(df: pd.DataFrame) -> pd.Series:
-    if df.empty: return pd.Series([], dtype=bool)
+    if df.empty or "Month-Year" not in df.columns:
+        return pd.Series([], dtype=bool)
     m = pd.Series(True, index=df.index)
     if sel_year != "All":
-        m &= df["Month-Year"].str.startswith(sel_year)
+        m &= df["Month-Year"].astype(str).str.startswith(sel_year)
     if sel_month_name != "All":
-        # find numeric month from the name
-        month_num = next((k for k,v in months_map.items() if v == sel_month_name), None)
+        month_num = next((k for k, v in months_map.items() if v == sel_month_name), None)
         if month_num:
-            m &= df["Month-Year"].str.endswith(month_num)
+            m &= df["Month-Year"].astype(str).str.endswith(month_num)
     return m
 
-# Apply to Calls view
-mask_calls = period_mask(df_calls)
-if sel_cat != "All":  mask_calls &= df_calls["Category"] == sel_cat
-if sel_name != "All": mask_calls &= df_calls["Name"] == sel_name
-view_calls = df_calls.loc[mask_calls].copy()
+# Apply period filter to ALL datasets
+filtered_calls = df_calls.loc[period_mask(df_calls)].copy()
+filtered_pnc   = df_pnc.loc[period_mask(df_pnc)].copy()
+filtered_ncl   = df_ncl.loc[period_mask(df_ncl)].copy()
 
+# Apply Calls category/name filters
+mask_calls_extra = pd.Series(True, index=filtered_calls.index)
+if sel_cat != "All":  mask_calls_extra &= filtered_calls["Category"] == sel_cat
+if sel_name != "All": mask_calls_extra &= filtered_calls["Name"] == sel_name
+view_calls = filtered_calls.loc[mask_calls_extra].copy()
 
 # =========================
-# 🧮 TOP BLOCK (Leads/PNCs + NCL)
+# 🧮 TOP BLOCK (Leads/PNCs + NCL) — computed from filtered data
 # =========================
 st.markdown("---")
 st.subheader("Top Block — Conversion KPIs")
 
-def month_mask(df: pd.DataFrame) -> pd.Series:
-    return period_mask(df)
+leads_total = int(filtered_pnc["Leads"].sum()) if not filtered_pnc.empty else 0
+pncs_total  = int(filtered_pnc["PNCs"].sum()) if not filtered_pnc.empty else 0
 
-
-pnc_view = df_pnc.loc[month_mask(df_pnc)].copy()
-ncl_view = df_ncl.loc[month_mask(df_ncl)].copy()
-
-leads_total = int(pnc_view["Leads"].sum()) if not pnc_view.empty else 0
-pncs_total  = int(pnc_view["PNCs"].sum()) if not pnc_view.empty else 0
-
-retained_total = int(ncl_view["Retained_Total"].fillna(0).sum()) if not ncl_view.empty else 0
-consult_known  = bool(ncl_view.get("HasConsultSplit", pd.Series([False])).any())
-retained_with_consult    = int(ncl_view["Retained_With_Consult"].fillna(0).sum()) if consult_known else None
-retained_without_consult = int(ncl_view["Retained_Without_Consult"].fillna(0).sum()) if consult_known else None
+retained_total = int(filtered_ncl["Retained_Total"].fillna(0).sum()) if not filtered_ncl.empty else 0
+consult_known  = bool(filtered_ncl.get("HasConsultSplit", pd.Series([False])).any())
+retained_with_consult    = int(filtered_ncl["Retained_With_Consult"].fillna(0).sum()) if consult_known else None
+retained_without_consult = int(filtered_ncl["Retained_Without_Consult"].fillna(0).sum()) if consult_known else None
 
 k1,k2,k3 = st.columns(3)
 k1.metric("#Leads", f"{leads_total:,}")
@@ -537,22 +528,21 @@ k9.metric("% of PNCs who retained after consult", pct_after_consult_str)
 
 k10,k11 = st.columns(2)
 k10.metric("# of Total PNCs who retained", f"{retained_total:,}")
-pct_total_retained = (retained_total/pncs_total*100.0) if pncs_total>0 else 0.0
+pct_total_retained = (retained_total / pncs_total * 100.0) if pncs_total > 0 else 0.0
 k11.metric("% of Total PNCs who retained", f"{pct_total_retained:.1f}%")
 
-if not consult_known and not ncl_view.empty:
-    st.info("Your New Client List doesn’t include a ‘Retained With Consult (Y/N)’ column. "
-            "We’re showing total retained only; consult split metrics are unavailable for these uploads.")
+if not consult_known and not filtered_ncl.empty:
+    st.info("Your New Client List for the selected period doesn’t include a ‘Retained With Consult (Y/N)’ column. "
+            "Showing total retained only; consult-split metrics are unavailable for these uploads.")
 
 with st.expander("How these are calculated"):
     st.markdown(
         """
-- **#Leads**: count of rows in the Leads/PNCs file (all rows in Column A = leads).
+- **#Leads**: count from the Leads/PNCs file (all rows).
 - **#PNCs**: leads **excluding** rows whose **Stage** is in your excluded list.
-- **PNCs who retained without consult** / **after consult**: from *New Client List* **only when** a “Retained With Consult (Y/N)” column is present.
+- **PNCs retained after/without consult**: from *New Client List* **only when** a “Retained With Consult (Y/N)” column is present.
 - **# of Total PNCs who retained**: from *New Client List*, row count (or Y+N when the column exists).
-- **% of Total PNCs who retained**: `(# total retained / #PNCs) × 100`.
-- Consult scheduling/show-up metrics are placeholders until we connect the consult report.
+- **% of Total PNCs who retained**: `(# total retained / #PNCs) × 100`, for the **selected Month/Year**.
 """
     )
 
