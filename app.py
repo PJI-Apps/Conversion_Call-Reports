@@ -13,6 +13,8 @@ import json
 import hashlib
 import datetime as dt
 from typing import List, Dict, Tuple
+from typing import Optional
+
 
 import pandas as pd
 import streamlit as st
