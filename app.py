@@ -676,10 +676,11 @@ if not _soft_has(df_ncl, "Date we had BOTH the signed CLA and full payment"):
     st.error("[New Client List] missing `Date we had BOTH the signed CLA and full payment`."); st.stop()
 
 # Row 1 — Leads (exclude Non-Lead)
-row1 = int(df_leads.loc[
-    df_leads["Stage"].astype(str).str.strip() != "Marketing/Scam/Spam (Non-Lead"),
-    "Stage"
-].shape[0])
+row1 = int(
+    df_leads.loc[
+        df_leads["Stage"].astype(str).str.strip() != "Marketing/Scam/Spam (Non-Lead)"
+    ].shape[0]
+)
 
 # Row 2 — PNCs (exclude the specified set)
 EXCLUDED_PNC_STAGES = {
@@ -689,10 +690,11 @@ EXCLUDED_PNC_STAGES = {
     "Micayla S.","Nathanial B.","Rialet v H.","Sihle G.","Thabang T.","Tiffany P",
     ":Chloe L:","Nobuhle M."
 }
-row2 = int(df_leads.loc[
-    ~df_leads["Stage"].astype(str).str.strip().isin(EXCLUDED_PNC_STAGES),
-    "Stage"
-].shape[0])
+row2 = int(
+    df_leads.loc[
+        ~df_leads["Stage"].astype(str).str.strip().isin(EXCLUDED_PNC_STAGES)
+    ].shape[0]
+)
 
 # Month filters for the three date-bearing datasets
 init_mask = _conv_mask_by_month(df_init, "Initial Consultation With Pji Law")
