@@ -485,15 +485,28 @@ if not view_calls.empty and plotly_ok:
         fig1.update_layout(xaxis=dict(tickformat="%b %Y"))
         st.plotly_chart(fig1, use_container_width=True)
 
-    comp = (view_calls.groupby("Name", as_index=False)[["Completed Calls","Total Calls"]].sum())
-    comp["Completion Rate (%)"] = comp.apply(
-        lambda r: (r["Completed Calls"]/r["Total Calls"]*100.0) if r["Total Calls"]>0 else 0.0, axis=1)
-    comp = comp.sort_values("Completion Rate (%)", ascending=False)
-    with st.expander("✅ Completion rate by staff", expanded=False):
-        fig2 = px.bar(comp, x="Name", y="Completion Rate (%)",
-                      labels={"Name":"Staff","Completion Rate (%)":"Completion Rate (%)"})
-        fig2.update_layout(xaxis={'categoryorder':'array','categoryarray':comp["Name"].tolist()})
-        st.plotly_chart(fig2, use_container_width=True)
+# Completion rate by staff (robust to empty/mixed dtypes)
+    comp = view_calls.groupby("Name", as_index=False)[["Completed Calls", "Total Calls"]].sum()
+
+    if comp.empty or not {"Completed Calls", "Total Calls"} <= set(comp.columns):
+        st.info("No data available to compute completion rates for the current filters.")
+    else:
+        c_done = pd.to_numeric(comp["Completed Calls"], errors="coerce").fillna(0.0)
+        c_tot  = pd.to_numeric(comp["Total Calls"], errors="coerce").fillna(0.0)
+
+        # Avoid div-by-zero cleanly
+        comp["Completion Rate (%)"] = (c_done / c_tot.where(c_tot != 0, pd.NA) * 100).fillna(0.0)
+
+        comp = comp.sort_values("Completion Rate (%)", ascending=False)
+
+        with st.expander("✅ Completion rate by staff", expanded=False):
+            fig2 = px.bar(
+                comp, x="Name", y="Completion Rate (%)",
+                labels={"Name": "Staff", "Completion Rate (%)": "Completion Rate (%)"}
+            )
+            fig2.update_layout(xaxis={'categoryorder': 'array', 'categoryarray': comp["Name"].tolist()})
+            st.plotly_chart(fig2, use_container_width=True)
+
 
     by_name = view_calls.groupby("Name", as_index=False).apply(
         lambda g: pd.Series({"Avg Seconds (weighted)": (g["__avg_sec"]*g["Total Calls"]).sum()/max(g["Total Calls"].sum(),1)})
