@@ -1,11 +1,11 @@
 # app.py
 # ---------------------------
 # PJI Law • Call Reports + Conversion Report (Streamlit)
-# - Auth via streamlit-authenticator (0.3.2 API; 'form_name' style)
-# - Calls module: upload Zoom CSVs, de-dupe, master store (Zoom_Calls), filters, charts (minimized)
+# - Auth via streamlit-authenticator (version-tolerant wrapper: works with 0.3.x and 0.4.x+)
+# - Calls module: upload Zoom CSVs, de-dupe, optional Google Sheets master (Zoom_Calls),
+#   filters, charts (default minimized)
 # - Conversion Report: uploads via date range (Reporter-only expander),
-#   KPIs filtered by Year/Month pick list (like Calls), master store for 4 datasets
-# - Optional Google Sheets master store (private) for persistent accumulation & dedupe
+#   KPIs filtered by Year/Month pick list, optional Google Sheets master for 4 datasets
 # - No secrets in repo; secrets via Streamlit Secrets
 # ---------------------------
 
@@ -21,7 +21,7 @@ import yaml
 import streamlit_authenticator as stauth
 
 # =========================
-# 🔐 AUTHENTICATION (0.3.2)
+# 🔐 AUTHENTICATION (version-tolerant)
 # =========================
 st.set_page_config(page_title="PJI Law Reports", page_icon="📈", layout="wide")
 
@@ -34,8 +34,33 @@ try:
         config["cookie"]["expiry_days"],
         config.get("preauthorized", {}).get("emails", []),
     )
-    # 0.3.2 API uses ('form_name', 'location')
-    name, auth_status, username = authenticator.login('Login', 'main')
+
+    # ---- version-tolerant login wrapper (works with 0.3.x and 0.4.x+) ----
+    def _login_compat(authenticator_obj):
+        """Return (name, auth_status, username) across authenticator versions."""
+        # Try NEW API first (fields=..., location=...)
+        try:
+            res = authenticator_obj.login(
+                fields={"Form name": "Login", "Username": "Username", "Password": "Password"},
+                location="main",
+            )
+            if isinstance(res, tuple) and len(res) == 3:
+                return res
+            if isinstance(res, dict):
+                return res.get("name"), res.get("authentication_status"), res.get("username")
+            if res is not None:
+                return res
+        except TypeError:
+            pass
+        except Exception:
+            pass
+        # Fallback: OLD API ('form_name', 'location')
+        try:
+            return authenticator_obj.login("Login", "main")
+        except TypeError:
+            return authenticator_obj.login(form_name="Login", location="main")
+
+    name, auth_status, username = _login_compat(authenticator)
 
     if auth_status is False:
         st.error("Username/password is incorrect"); st.stop()
@@ -61,7 +86,7 @@ def _gsheet_client():
         ms = st.secrets.get("master_store", None)
         if not sa or not ms or "sheet_url" not in ms:
             return None, None
-        scopes = ["https://www.googleapis.com/auth/spreadsheets"]
+        scopes = ["https://www.googleapis.com/auth/spreadsheets"]  # Sheets-only scope
         creds = Credentials.from_service_account_info(sa, scopes=scopes)
         gc = gspread.authorize(creds)
         sh = gc.open_by_url(ms["sheet_url"])
@@ -99,20 +124,6 @@ def _read_ws(ws) -> pd.DataFrame:
     except Exception as e:
         st.error(f"Read failed for '{ws.title}': {e}")
         return pd.DataFrame()
-
-def _append_df(ws, df: pd.DataFrame):
-    if ws is None or df is None or df.empty: return
-    import gspread_dataframe as gd
-    try:
-        data = ws.get_all_values()
-        if len(data) == 0:
-            gd.set_with_dataframe(ws, df.reset_index(drop=True), include_index=False, include_column_header=True)
-        else:
-            start_row = len(data) + 1
-            gd.set_with_dataframe(ws, df.reset_index(drop=True), row=start_row,
-                                  include_index=False, include_column_header=False)
-    except Exception as e:
-        st.error(f"Append failed for '{ws.title}': {e}")
 
 def _unique_key(df: pd.DataFrame, dataset: str) -> pd.Series:
     # Stable dedupe keys per dataset
@@ -158,6 +169,7 @@ def _upsert_master(dataset_name: str, df_new: pd.DataFrame, keycol: str = "__key
 
     df_new = df_new.copy()
     df_new.columns = [str(c).strip() for c in df_new.columns]
+    # Normalize label variant for NCL
     if dataset_name == "New_Clients" and "Retained with Consult (Y/N)" in df_new.columns and "Retained With Consult (Y/N)" not in df_new.columns:
         df_new = df_new.rename(columns={"Retained with Consult (Y/N)":"Retained With Consult (Y/N)"})
 
@@ -167,6 +179,7 @@ def _upsert_master(dataset_name: str, df_new: pd.DataFrame, keycol: str = "__key
     if not df_master.empty and keycol not in df_master.columns:
         df_master[keycol] = _unique_key(df_master, dataset_name)
 
+    # Optional purge of month in date-bearing datasets
     if month_scope is not None and not df_master.empty:
         start, end = month_scope
         date_col = None
@@ -176,9 +189,7 @@ def _upsert_master(dataset_name: str, df_new: pd.DataFrame, keycol: str = "__key
             date_col = "Initial Consultation With Pji Law"
         elif dataset_name == "Discovery_Meeting":
             date_col = "Discovery Meeting With Pji Law"
-        elif dataset_name == "Zoom_Calls":
-            date_col = None  # aggregated by Month-Year already
-
+        # Zoom_Calls is aggregated by Month-Year; we skip date-based purge
         if date_col and date_col in df_master.columns:
             m = pd.to_datetime(df_master[date_col], errors="coerce").between(start, end)
             df_master = df_master.loc[~m].copy()
@@ -599,14 +610,13 @@ if is_reporter:
         # Append to master if requested
         append_now = st.checkbox("Append these uploads to the Master Store (deduped)", value=False)
         if append_now:
-            # Define month scope as the month of upload_start (purge/replace month for date-bearing sheets)
             month_scope = (pd.Timestamp(upload_start).replace(day=1),
                            (pd.Timestamp(upload_start).replace(day=28) + pd.Timedelta(days=4)).replace(day=1) - pd.Timedelta(days=1))
             ok = True
-            if df_leads_up is not None: ok &= _upsert_master("Leads_PNCs", df_leads_up)
-            if df_ncl_up   is not None: ok &= _upsert_master("New_Clients", df_ncl_up, month_scope=month_scope)
-            if df_init_up  is not None: ok &= _upsert_master("Initial_Consultation", df_init_up, month_scope=month_scope)
-            if df_disc_up  is not None: ok &= _upsert_master("Discovery_Meeting",   df_disc_up, month_scope=month_scope)
+            if isinstance(df_leads_up, pd.DataFrame): ok &= _upsert_master("Leads_PNCs", df_leads_up)
+            if isinstance(df_ncl_up,   pd.DataFrame): ok &= _upsert_master("New_Clients", df_ncl_up, month_scope=month_scope)
+            if isinstance(df_init_up,  pd.DataFrame): ok &= _upsert_master("Initial_Consultation", df_init_up, month_scope=month_scope)
+            if isinstance(df_disc_up,  pd.DataFrame): ok &= _upsert_master("Discovery_Meeting",   df_disc_up, month_scope=month_scope)
             st.success("Masters updated (deduped).") if ok else st.warning("Some master updates failed — see messages above.")
 
 # ----- Read effective data sources for Conversion (prefer master; fallback to last uploads if available) -----
