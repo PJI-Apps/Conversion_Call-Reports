@@ -6,14 +6,15 @@
 #   1) Zoom Calls (robust header mapping)
 #   2) Leads/PNCs (bucket by intake specialist; PNC logic)
 #   3) New Client List (retained Y/N; tolerant loader with fallback)
-# - Unified reporting-period filter (Month/Year) applied to ALL datasets (Calls, PNC, NCL)
-# - Top Block KPIs (Leads/PNCs + NCL)
-# - Calls table + 3 interactive charts (bottom; Plotly import guarded)
+# - Unified reporting-period filter (Month/Year) applied to ALL datasets
+# - De-duplicate uploads (file hash) + Sidebar Data Manager to clear memory
+# - Top Block KPIs + Calls table + charts (Plotly import guarded)
 # - No files written to disk
 # ---------------------------
 
 import io
 import re
+import hashlib
 import datetime as dt
 from typing import List, Dict, Tuple
 
@@ -21,7 +22,7 @@ import pandas as pd
 import streamlit as st
 import yaml
 import streamlit_authenticator as stauth
-# Plotly import is deferred + guarded later
+# Plotly import deferred/guarded later
 
 # =========================
 # 🔐 AUTHENTICATION
@@ -127,6 +128,14 @@ def validate_single_month_range(start: dt.date, end: dt.date) -> Tuple[bool, str
     if (start.year, start.month) != (end.year, end.month):
         return False, "Please select a range within a single calendar month (e.g., 1–31 July 2025)."
     return True, ""
+
+def file_md5(uploaded_file) -> str:
+    """Hash file contents to avoid double counting across re-uploads."""
+    pos = uploaded_file.tell()
+    uploaded_file.seek(0)
+    data = uploaded_file.read()
+    uploaded_file.seek(pos if pos is not None else 0)
+    return hashlib.md5(data).hexdigest()
 
 # =========================
 # 🧩 PROCESSORS
@@ -270,8 +279,7 @@ def process_ncl_csv(raw: pd.DataFrame, period_key: str) -> pd.DataFrame:
     rename_map, used = {}, set()
     for canonical, alts in synonyms.items():
         for actual, n in col_norm.items():
-            if actual in used:
-                continue
+            if actual in used: continue
             if n in alts:
                 rename_map[actual] = canonical
                 used.add(actual)
@@ -337,42 +345,91 @@ def upload_section(section_id: str, title: str) -> Tuple[str, object]:
     st.divider()
     return period_key, uploaded
 
-# Session state holders
+# =========================
+# 🧠 SESSION STATE + DATA MANAGER
+# =========================
 for k in ["batches_calls","batches_pnc","batches_ncl"]:
     if k not in st.session_state:
         st.session_state[k] = []
+for k in ["hashes_calls","hashes_pnc","hashes_ncl"]:
+    if k not in st.session_state:
+        st.session_state[k] = set()
 
-# Sections
+with st.sidebar.expander("🧹 Data manager", expanded=False):
+    st.caption("Affects only your current session.")
+    c1, c2 = st.columns(2)
+    c1.metric("Calls batches", len(st.session_state["batches_calls"]))
+    c2.metric("Leads/PNCs batches", len(st.session_state["batches_pnc"]))
+    st.metric("New Client List batches", len(st.session_state["batches_ncl"]))
+
+    if st.button("Clear Calls data"):
+        st.session_state["batches_calls"].clear(); st.session_state["hashes_calls"].clear()
+        st.success("Cleared Calls data.")
+    if st.button("Clear Leads/PNCs data"):
+        st.session_state["batches_pnc"].clear(); st.session_state["hashes_pnc"].clear()
+        st.success("Cleared Leads/PNCs data.")
+    if st.button("Clear New Client List data"):
+        st.session_state["batches_ncl"].clear(); st.session_state["hashes_ncl"].clear()
+        st.success("Cleared New Client List data.")
+    if st.button("Clear ALL data"):
+        for k in ["batches_calls","batches_pnc","batches_ncl"]: st.session_state[k].clear()
+        for k in ["hashes_calls","hashes_pnc","hashes_ncl"]: st.session_state[k].clear()
+        st.success("Cleared all uploaded data for this session.")
+
+    if st.button("Reset reporting-period filters"):
+        try:
+            st.rerun()
+        except Exception:
+            st.experimental_rerun()
+
+# =========================
+# ⬆️ UPLOADERS (with de-dupe)
+# =========================
 calls_period_key, calls_uploader = upload_section("zoom_calls", "Zoom Calls")
 if calls_uploader:
     try:
-        raw = pd.read_csv(calls_uploader)
-        processed = process_calls_csv(raw, calls_period_key)
-        st.session_state["batches_calls"].append(processed)
-        st.success(f"Calls: loaded {len(processed)} row(s) for {calls_period_key}.")
+        fhash = file_md5(calls_uploader)
+        if fhash in st.session_state["hashes_calls"]:
+            st.warning("Calls: duplicate file — ignored.")
+        else:
+            raw = pd.read_csv(calls_uploader)
+            processed = process_calls_csv(raw, calls_period_key)
+            st.session_state["batches_calls"].append(processed)
+            st.session_state["hashes_calls"].add(fhash)
+            st.success(f"Calls: loaded {len(processed)} row(s) for {calls_period_key}.")
     except Exception as e:
         st.error("Could not parse Calls CSV."); st.exception(e)
 
 pnc_period_key, pnc_uploader = upload_section("leads_pncs", "Leads / PNCs")
 if pnc_uploader:
     try:
-        raw = pd.read_csv(pnc_uploader)
-        processed = process_pnc_csv(raw, pnc_period_key)
-        st.session_state["batches_pnc"].append(processed)
-        st.success(f"Leads/PNCs: loaded {processed['Leads'].sum()} leads, {processed['PNCs'].sum()} PNCs for {pnc_period_key}.")
+        fhash = file_md5(pnc_uploader)
+        if fhash in st.session_state["hashes_pnc"]:
+            st.warning("Leads/PNCs: duplicate file — ignored.")
+        else:
+            raw = pd.read_csv(pnc_uploader)
+            processed = process_pnc_csv(raw, pnc_period_key)
+            st.session_state["batches_pnc"].append(processed)
+            st.session_state["hashes_pnc"].add(fhash)
+            st.success(f"Leads/PNCs: loaded {processed['Leads'].sum()} leads, {processed['PNCs'].sum()} PNCs for {pnc_period_key}.")
     except Exception as e:
         st.error("Could not parse Leads/PNCs CSV."); st.exception(e)
 
 ncl_period_key, ncl_uploader = upload_section("new_client_list", "New Client List")
 if ncl_uploader:
     try:
-        raw = pd.read_csv(ncl_uploader)
-        processed = process_ncl_csv(raw, ncl_period_key)
-        st.session_state["batches_ncl"].append(processed)
-        if bool(processed.get("HasConsultSplit", pd.Series([False])).any()):
-            st.success(f"New Client List: loaded totals + consult split for {ncl_period_key}.")
+        fhash = file_md5(ncl_uploader)
+        if fhash in st.session_state["hashes_ncl"]:
+            st.warning("New Client List: duplicate file — ignored.")
         else:
-            st.warning(f"New Client List: loaded totals for {ncl_period_key} (consult split column not found).")
+            raw = pd.read_csv(ncl_uploader)
+            processed = process_ncl_csv(raw, ncl_period_key)
+            st.session_state["batches_ncl"].append(processed)
+            st.session_state["hashes_ncl"].add(fhash)
+            if bool(processed.get("HasConsultSplit", pd.Series([False])).any()):
+                st.success(f"NCL: loaded totals + consult split for {ncl_period_key}.")
+            else:
+                st.warning(f"NCL: loaded totals for {ncl_period_key} (consult split column not found).")
     except Exception as e:
         st.error("Could not parse New Client List CSV."); st.exception(e)
 
@@ -383,17 +440,17 @@ if ncl_uploader:
 if st.session_state["batches_calls"]:
     df_calls = pd.concat(st.session_state["batches_calls"], ignore_index=True)
     def _to_sec_col(s: pd.Series) -> pd.Series:
-        return pd.to_timedelta(s, errors="coerce").dt.total_seconds().fillna(0.0)
+        return pd.to_datetime(s, errors="coerce").astype("timedelta64[s]").fillna(0).astype(float)
     for c in ["Total Calls","Completed Calls","Outgoing","Received",
               "Forwarded to Voicemail","Answered by Other","Missed"]:
         if c in df_calls.columns:
             df_calls[c] = pd.to_numeric(df_calls[c], errors="coerce").fillna(0).astype(int)
     if "__total_sec" not in df_calls.columns and "Total Call Time" in df_calls.columns:
-        df_calls["__total_sec"] = _to_sec_col(df_calls["Total Call Time"])
+        df_calls["__total_sec"] = pd.to_timedelta(df_calls["Total Call Time"], errors="coerce").dt.total_seconds().fillna(0.0)
     if "__hold_sec" not in df_calls.columns and "Total Hold Time" in df_calls.columns:
-        df_calls["__hold_sec"] = _to_sec_col(df_calls["Total Hold Time"])
+        df_calls["__hold_sec"] = pd.to_timedelta(df_calls["Total Hold Time"], errors="coerce").dt.total_seconds().fillna(0.0)
     if "__avg_sec" not in df_calls.columns and "Avg Call Time" in df_calls.columns:
-        df_calls["__avg_sec"] = _to_sec_col(df_calls["Avg Call Time"])
+        df_calls["__avg_sec"] = pd.to_timedelta(df_calls["Avg Call Time"], errors="coerce").dt.total_seconds().fillna(0.0)
     if not df_calls.empty:
         grouped_counts = df_calls.groupby(["Month-Year","Category","Name"], as_index=False).agg(
             {"Total Calls":"sum","Completed Calls":"sum","Outgoing":"sum","Received":"sum",
@@ -493,7 +550,7 @@ if sel_name != "All": mask_calls_extra &= filtered_calls["Name"] == sel_name
 view_calls = filtered_calls.loc[mask_calls_extra].copy()
 
 # =========================
-# 🧮 TOP BLOCK (Leads/PNCs + NCL) — computed from filtered data
+# 🧮 TOP BLOCK (from filtered data)
 # =========================
 st.markdown("---")
 st.subheader("Top Block — Conversion KPIs")
@@ -532,8 +589,8 @@ pct_total_retained = (retained_total / pncs_total * 100.0) if pncs_total > 0 els
 k11.metric("% of Total PNCs who retained", f"{pct_total_retained:.1f}%")
 
 if not consult_known and not filtered_ncl.empty:
-    st.info("Your New Client List for the selected period doesn’t include a ‘Retained With Consult (Y/N)’ column. "
-            "Showing total retained only; consult-split metrics are unavailable for these uploads.")
+    st.info("For the selected period the New Client List lacks ‘Retained With Consult (Y/N)’. "
+            "Showing total retained only; consult-split metrics are unavailable.")
 
 with st.expander("How these are calculated"):
     st.markdown(
