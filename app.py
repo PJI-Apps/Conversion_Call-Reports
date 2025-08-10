@@ -1,10 +1,10 @@
 # app.py
-# PJI Law • Call + Conversion Reports (Streamlit)
+# PJI Law • Conversion and Call Report (Streamlit)
 # - Auth (version-tolerant)
 # - Google Sheets master (5 worksheets)
-# - Calls persisted too
-# - Uploader expander collapsed; visible to everyone (reporter gating code included but commented out)
-# - Conversion results Year/Month filters; uploads = date range
+# - Calls persisted; master kept clean (helpers recomputed in-memory)
+# - Upload expander collapsed by default but "sticky-open" after interaction
+# - Conversion results Month/Year filters; uploads are date ranges
 # - Robust charts (no dtype/empty-frame crashes)
 
 import io
@@ -12,7 +12,7 @@ import re
 import json
 import hashlib
 import datetime as dt
-from typing import List, Dict, Tuple, Optional
+from typing import List, Dict, Tuple
 
 import pandas as pd
 import streamlit as st
@@ -70,6 +70,12 @@ try:
 except Exception as e:
     st.error("Authentication is not configured correctly. Check your **Secrets**.")
     st.exception(e); st.stop()
+
+# ───────────────────────────────────────────────────────────────────────────────
+# Page header
+# ───────────────────────────────────────────────────────────────────────────────
+st.title("📊 Conversion and Call Report")
+st.markdown("### 📞 Zoom Call Reports")
 
 # ───────────────────────────────────────────────────────────────────────────────
 # Google Sheets master (one spreadsheet URL, five worksheets/tabs)
@@ -140,6 +146,7 @@ def _read_ws_by_name(logical_key: str) -> pd.DataFrame:
         import gspread_dataframe as gd
         df = gd.get_as_dataframe(ws, evaluate_formulas=True, dtype=str)
         df = df.loc[:, ~df.columns.str.contains("^Unnamed")]
+        # parse likely date columns
         for c in df.columns:
             cl = c.lower()
             if "date" in cl or "with pji law" in cl:
@@ -183,11 +190,6 @@ CATEGORY_CALLS: Dict[str, str] = {
     "Shaylin Steyn":"Receptionist","Sihle Gadu":"Intake","Thabang Tshubyane":"Intake","Tiffany":"Intake",
 }
 RENAME_NAME_CALLS = {"Riekie Van Ellinckhuyzen": "Maria Van Ellinckhuyzen"}
-OUT_COLUMNS_CALLS = [
-    "Category","Name","Total Calls","Completed Calls","Outgoing","Received",
-    "Forwarded to Voicemail","Answered by Other","Missed",
-    "Avg Call Time","Total Call Time","Total Hold Time","Month-Year"
-]
 
 def _fmt_hms(seconds: pd.Series) -> pd.Series:
     return seconds.round().astype(int).map(lambda s: str(dt.timedelta(seconds=s)))
@@ -287,6 +289,7 @@ def process_calls_csv(raw: pd.DataFrame, period_key: str) -> pd.DataFrame:
     out["Total Call Time"] = _fmt_hms(out["_total_sec"])
     out["Total Hold Time"] = _fmt_hms(out["_hold_sec"])
 
+    # Keep helpers for charts (not saved to master)
     out["__avg_sec"]   = out["avg_sec_weighted"]
     out["__total_sec"] = out["_total_sec"]
     out["__hold_sec"]  = out["_hold_sec"]
@@ -298,11 +301,18 @@ def process_calls_csv(raw: pd.DataFrame, period_key: str) -> pd.DataFrame:
     return out
 
 # ───────────────────────────────────────────────────────────────────────────────
+# Sticky-open expander helpers
+# ───────────────────────────────────────────────────────────────────────────────
+def _keep_open_flag(flag_key: str):
+    st.session_state[flag_key] = True
+
+if "exp_upload_open" not in st.session_state:
+    st.session_state["exp_upload_open"] = False
+
+# ───────────────────────────────────────────────────────────────────────────────
 # UI — Calls
 # ───────────────────────────────────────────────────────────────────────────────
-st.title("📞 Zoom Call Reports")
-
-def upload_section(section_id: str, title: str) -> Tuple[str, object]:
+def upload_section(section_id: str, title: str, expander_flag: str) -> Tuple[str, object]:
     st.subheader(title)
     today = dt.date.today()
     first_of_month = today.replace(day=1)
@@ -310,14 +320,32 @@ def upload_section(section_id: str, title: str) -> Tuple[str, object]:
     last_of_month = next_month - dt.timedelta(days=1)
 
     c1, c2 = st.columns(2)
-    start = c1.date_input("Start date", value=first_of_month, key=f"{section_id}_start")
-    end   = c2.date_input("End date", value=last_of_month,   key=f"{section_id}_end")
+    start = c1.date_input(
+        "Start date",
+        value=first_of_month,
+        key=f"{section_id}_start",
+        on_change=_keep_open_flag,
+        args=(expander_flag,),
+    )
+    end = c2.date_input(
+        "End date",
+        value=last_of_month,
+        key=f"{section_id}_end",
+        on_change=_keep_open_flag,
+        args=(expander_flag,),
+    )
     ok, msg = validate_single_month_range(start, end)
     if not ok:
         st.error(msg); st.stop()
     period_key = month_key_from_range(start, end)
 
-    uploaded = st.file_uploader(f"Upload {title} CSV", type=["csv"], key=f"{section_id}_uploader")
+    uploaded = st.file_uploader(
+        f"Upload {title} CSV",
+        type=["csv"],
+        key=f"{section_id}_uploader",
+        on_change=_keep_open_flag,
+        args=(expander_flag,),
+    )
     st.divider()
     return period_key, uploaded
 
@@ -334,9 +362,9 @@ is_reporter = True  # <- everyone can access uploaders for now
 if "hashes_calls" not in st.session_state: st.session_state["hashes_calls"] = set()
 if "hashes_conv"  not in st.session_state: st.session_state["hashes_conv"]  = set()
 
-with st.expander("🛠️ Upload data (Calls & Conversion)", expanded=False):
+with st.expander("🛠️ Upload data (Calls & Conversion)", expanded=st.session_state.get("exp_upload_open", False)):
     # Calls uploader (single-month range)
-    calls_period_key, calls_uploader = upload_section("zoom_calls", "Zoom Calls")
+    calls_period_key, calls_uploader = upload_section("zoom_calls", "Zoom Calls", "exp_upload_open")
     if calls_uploader:
         try:
             fhash = file_md5(calls_uploader)
@@ -346,19 +374,28 @@ with st.expander("🛠️ Upload data (Calls & Conversion)", expanded=False):
                 raw = pd.read_csv(calls_uploader)
                 processed = process_calls_csv(raw, calls_period_key)
 
-                # Upsert into CALLS tab (dedupe by Month-Year + Name + Category)
+                # Keep master sheet clean (drop helper columns)
+                CALLS_MASTER_COLS = [
+                    "Category","Name","Total Calls","Completed Calls","Outgoing","Received",
+                    "Forwarded to Voicemail","Answered by Other","Missed",
+                    "Avg Call Time","Total Call Time","Total Hold Time","Month-Year"
+                ]
+                processed_clean = processed[CALLS_MASTER_COLS].copy()
+
                 if GSHEET is None:
                     st.warning("Master store not configured; Calls will not persist.")
-                    df_calls_master = processed.copy()
+                    df_calls_master = processed_clean.copy()
                 else:
                     current = _read_ws_by_name("CALLS")
-                    combined = pd.concat([current, processed], ignore_index=True) if not current.empty else processed.copy()
+                    combined = (pd.concat([current, processed_clean], ignore_index=True)
+                                if not current.empty else processed_clean.copy())
+                    # Dedupe by Month-Year + Name + Category
                     key = (combined["Month-Year"].astype(str).str.strip() + "|" +
                            combined["Name"].astype(str).str.strip() + "|" +
                            combined["Category"].astype(str).str.strip())
                     combined = combined.loc[~key.duplicated(keep="last")].copy()
                     _write_ws_by_name("CALLS", combined)
-                    st.success(f"Calls: upserted {len(processed)} row(s) into '{TAB_NAMES['CALLS']}'.")
+                    st.success(f"Calls: upserted {len(processed_clean)} row(s) into '{TAB_NAMES['CALLS']}'.")
                     df_calls_master = combined.copy()
                 st.session_state["hashes_calls"].add(fhash)
         except Exception as e:
@@ -366,8 +403,20 @@ with st.expander("🛠️ Upload data (Calls & Conversion)", expanded=False):
 
     # ───────── Conversion uploaders (date range) ─────────
     c1, c2 = st.columns(2)
-    upload_start = c1.date_input("Conversion upload start date", value=dt.date.today().replace(day=1), key="conv_upload_start")
-    upload_end   = c2.date_input("Conversion upload end date",   value=dt.date.today(), key="conv_upload_end")
+    upload_start = c1.date_input(
+        "Conversion upload start date",
+        value=dt.date.today().replace(day=1),
+        key="conv_upload_start",
+        on_change=_keep_open_flag,
+        args=("exp_upload_open",),
+    )
+    upload_end   = c2.date_input(
+        "Conversion upload end date",
+        value=dt.date.today(),
+        key="conv_upload_end",
+        on_change=_keep_open_flag,
+        args=("exp_upload_open",),
+    )
     if upload_start > upload_end:
         st.error("Upload start must be on or before end.")
 
@@ -392,10 +441,14 @@ with st.expander("🛠️ Upload data (Calls & Conversion)", expanded=False):
         df.columns = [str(c).strip() for c in df.columns]
         return df
 
-    up_leads = st.file_uploader("Upload **Leads_PNCs**", type=["csv","xls","xlsx"], key="up_leads_pncs")
-    up_init  = st.file_uploader("Upload **Initial_Consultation**", type=["csv","xls","xlsx"], key="up_initial")
-    up_disc  = st.file_uploader("Upload **Discovery_Meeting**", type=["csv","xls","xlsx"], key="up_discovery")
-    up_ncl   = st.file_uploader("Upload **New Client List**", type=["csv","xls","xlsx"], key="up_ncl")
+    up_leads = st.file_uploader("Upload **Leads_PNCs**", type=["csv","xls","xlsx"],
+                                key="up_leads_pncs", on_change=_keep_open_flag, args=("exp_upload_open",))
+    up_init  = st.file_uploader("Upload **Initial_Consultation**", type=["csv","xls","xlsx"],
+                                key="up_initial", on_change=_keep_open_flag, args=("exp_upload_open",))
+    up_disc  = st.file_uploader("Upload **Discovery_Meeting**", type=["csv","xls","xlsx"],
+                                key="up_discovery", on_change=_keep_open_flag, args=("exp_upload_open",))
+    up_ncl   = st.file_uploader("Upload **New Client List**", type=["csv","xls","xlsx"],
+                                key="up_ncl", on_change=_keep_open_flag, args=("exp_upload_open",))
 
     uploads = {
         "LEADS": up_leads,
@@ -403,36 +456,36 @@ with st.expander("🛠️ Upload data (Calls & Conversion)", expanded=False):
         "DISC":  up_disc,
         "NCL":   up_ncl,
     }
-    for key, upl in uploads.items():
+    for key_name, upl in uploads.items():
         if not upl: continue
         try:
             fhash = file_md5(upl)
             if fhash in st.session_state["hashes_conv"]:
-                st.warning(f"{key}: duplicate file — ignored."); continue
+                st.warning(f"{key_name}: duplicate file — ignored."); continue
             df_up = _read_any(upl)
             if df_up is None or df_up.empty:
-                st.warning(f"{key}: file appears empty."); continue
+                st.warning(f"{key_name}: file appears empty."); continue
 
             # Normalize NCL retained flag variant
-            if key == "NCL" and "Retained with Consult (Y/N)" in df_up.columns and "Retained With Consult (Y/N)" not in df_up.columns:
+            if key_name == "NCL" and "Retained with Consult (Y/N)" in df_up.columns and "Retained With Consult (Y/N)" not in df_up.columns:
                 df_up = df_up.rename(columns={"Retained with Consult (Y/N)":"Retained With Consult (Y/N)"})
 
-            current = _read_ws_by_name(key)
+            current = _read_ws_by_name(key_name)
             combined = pd.concat([current, df_up], ignore_index=True) if not current.empty else df_up.copy()
 
             # Dedupe keys per dataset
-            if key == "LEADS":
+            if key_name == "LEADS":
                 k = (combined.get("Email","").astype(str).str.strip() + "|" +
                      combined.get("Matter ID","").astype(str).str.strip() + "|" +
                      combined.get("Stage","").astype(str).str.strip() + "|" +
                      combined.get("Initial Consultation With Pji Law","").astype(str) + "|" +
                      combined.get("Discovery Meeting With Pji Law","").astype(str))
-            elif key == "INIT":
+            elif key_name == "INIT":
                 k = (combined.get("Email","").astype(str).str.strip() + "|" +
                      combined.get("Matter ID","").astype(str).str.strip() + "|" +
                      combined.get("Initial Consultation With Pji Law","").astype(str) + "|" +
                      combined.get("Sub Status","").astype(str).str.strip())
-            elif key == "DISC":
+            elif key_name == "DISC":
                 k = (combined.get("Email","").astype(str).str.strip() + "|" +
                      combined.get("Matter ID","").astype(str).str.strip() + "|" +
                      combined.get("Discovery Meeting With Pji Law","").astype(str) + "|" +
@@ -444,11 +497,11 @@ with st.expander("🛠️ Upload data (Calls & Conversion)", expanded=False):
                      combined.get("Retained With Consult (Y/N)","").astype(str).str.strip())
 
             combined = combined.loc[~k.duplicated(keep="last")].copy()
-            _write_ws_by_name(key, combined)
-            st.success(f"{key}: upserted {len(df_up)} row(s) into '{TAB_NAMES[key]}'.")
+            _write_ws_by_name(key_name, combined)
+            st.success(f"{key_name}: upserted {len(df_up)} row(s) into '{TAB_NAMES[key_name]}'.")
             st.session_state["hashes_conv"].add(fhash)
         except Exception as e:
-            st.error(f"{key}: upload failed."); st.exception(e)
+            st.error(f"{key_name}: upload failed."); st.exception(e)
 
 # Load masters (or empty if not configured)
 df_calls = _read_ws_by_name("CALLS") if GSHEET is not None else locals().get("df_calls_master", pd.DataFrame())
@@ -456,6 +509,12 @@ df_leads = _read_ws_by_name("LEADS") if GSHEET is not None else pd.DataFrame()
 df_init  = _read_ws_by_name("INIT")  if GSHEET is not None else pd.DataFrame()
 df_disc  = _read_ws_by_name("DISC")  if GSHEET is not None else pd.DataFrame()
 df_ncl   = _read_ws_by_name("NCL")   if GSHEET is not None else pd.DataFrame()
+
+# Recompute helper seconds for Calls (master kept clean)
+if not df_calls.empty:
+    df_calls["__avg_sec"] = pd.to_timedelta(df_calls["Avg Call Time"], errors="coerce").dt.total_seconds().fillna(0.0)
+    df_calls["__total_sec"] = pd.to_timedelta(df_calls["Total Call Time"], errors="coerce").dt.total_seconds().fillna(0.0)
+    df_calls["__hold_sec"] = pd.to_timedelta(df_calls["Total Hold Time"], errors="coerce").dt.total_seconds().fillna(0.0)
 
 # ───────────────────────────────────────────────────────────────────────────────
 # Calls filters + table + charts
@@ -598,8 +657,6 @@ if not view_calls.empty and plotly_ok:
 st.markdown("---")
 st.header("Conversion Report")
 
-# Load masters already fetched: df_leads, df_init, df_disc, df_ncl
-
 months_map = {"01":"January","02":"February","03":"March","04":"April","05":"May","06":"June",
               "07":"July","08":"August","09":"September","10":"October","11":"November","12":"December"}
 def month_num_to_name(n): return months_map.get(n, n)
@@ -650,7 +707,7 @@ def _conv_mask_by_month(df: pd.DataFrame, date_col: str) -> pd.Series:
             mask &= s.dt.month.astype("Int64") == int(month_num)
     return mask & s.notna()
 
-# Validate soft requirements for columns; if missing, continue but show info
+# Load masters already fetched: df_leads, df_init, df_disc, df_ncl
 def _soft_has(df, col): return (df is not None) and (col in df.columns)
 
 missing_msgs = []
@@ -665,16 +722,15 @@ if missing_msgs:
 # Guard empty frames
 if any(df is None or df.empty for df in [df_leads, df_init, df_disc, df_ncl]):
     st.info("One or more Conversion masters are empty. Upload data in the uploader above.")
-    # Still render an empty table to keep layout consistent
     st.dataframe(pd.DataFrame({"Metric": [], "Value": []}), hide_index=True, use_container_width=True)
 else:
-    # Row 1 — Leads (exclude Non-Lead)
+    # Row 1 — # of Leads (exclude Non-Lead)
     row1 = int(
         df_leads.loc[
             df_leads["Stage"].astype(str).str.strip() != "Marketing/Scam/Spam (Non-Lead)"
         ].shape[0]
     )
-    # Row 2 — PNCs (exclude the specified set)
+    # Row 2 — # of PNCs (exclude the specified set)
     EXCLUDED_PNC_STAGES = {
         "Marketing/Scam/Spam (Non-Lead)","Referred Out","No Stage","New Lead",
         "No Follow Up (No Marketing/Communication)","No Follow Up (Receives Marketing/Communication)",
@@ -713,7 +769,7 @@ else:
     # Row 10 — total retained
     row10 = int(ncl_in.shape[0])
 
-    # Row 4 — scheduled consults = Init + Discovery (no exclusion for "Follow Up" here)
+    # Row 4 — scheduled consults = Init + Discovery
     row4 = int(init_in.shape[0] + disc_in.shape[0])
 
     # Row 6 — showed up for consultation (Sub Status == "Pnc")
@@ -769,61 +825,3 @@ with st.sidebar.expander("📦 Master Data (Google Sheets)", expanded=False):
     else:
         st.success("Connected to Master Store (Google Sheets).")
         st.caption("Tabs used: " + ", ".join(TAB_NAMES.values()))
-
-# ── Sidebar: Admin maintenance for master sheets ──
-with st.sidebar.expander("🧹 Admin: Maintain Master Sheets", expanded=False):
-    if GSHEET is None:
-        st.caption("Master not configured.")
-    else:
-        tabs = {
-            "Calls": "CALLS",
-            "Leads/PNCs": "LEADS",
-            "Initial Consultation": "INIT",
-            "Discovery Meeting": "DISC",
-            "New Client List": "NCL",
-        }
-        colA, colB = st.columns([2,1])
-        sel_label = colA.selectbox("Select sheet", list(tabs.keys()))
-        key = tabs[sel_label]
-
-        # Month purge (for date-bearing datasets)
-        col1, col2 = st.columns(2)
-        yr = col1.number_input("Year", min_value=2000, max_value=2100, value=dt.date.today().year, step=1)
-        mo = col2.number_input("Month", min_value=1, max_value=12, value=dt.date.today().month, step=1)
-
-        def _purge_month(logical_key: str, year: int, month: int) -> bool:
-            df = _read_ws_by_name(logical_key)
-            if df.empty: return True
-            # Figure out which date column to filter by
-            date_col = None
-            if logical_key == "NCL":
-                date_col = "Date we had BOTH the signed CLA and full payment"
-            elif logical_key == "INIT":
-                date_col = "Initial Consultation With Pji Law"
-            elif logical_key == "DISC":
-                date_col = "Discovery Meeting With Pji Law"
-            elif logical_key == "CALLS":
-                # CALLS is keyed by Month-Year
-                mkey = f"{year}-{month:02d}"
-                df = df.loc[df["Month-Year"] != mkey]
-                return _write_ws_by_name(logical_key, df)
-            else:
-                # LEADS has no canonical date; nothing to purge by month
-                return False
-
-            if date_col not in df.columns:
-                return False
-            s = pd.to_datetime(df[date_col], errors="coerce")
-            keep = ~((s.dt.year == year) & (s.dt.month == month))
-            df2 = df.loc[keep].copy()
-            return _write_ws_by_name(logical_key, df2)
-
-        if colB.button("Purge Month"):
-            ok = _purge_month(key, int(yr), int(mo))
-            st.success("Month purged.") if ok else st.warning("Nothing purged (missing date column or empty).")
-
-        st.divider()
-        if st.button(f"⚠️ Wipe ALL rows in '{sel_label}'"):
-            _write_ws_by_name(key, pd.DataFrame())
-            st.success(f"All rows wiped in '{sel_label}'.")
-
