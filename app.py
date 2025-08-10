@@ -769,3 +769,61 @@ with st.sidebar.expander("📦 Master Data (Google Sheets)", expanded=False):
     else:
         st.success("Connected to Master Store (Google Sheets).")
         st.caption("Tabs used: " + ", ".join(TAB_NAMES.values()))
+
+# ── Sidebar: Admin maintenance for master sheets ──
+with st.sidebar.expander("🧹 Admin: Maintain Master Sheets", expanded=False):
+    if GSHEET is None:
+        st.caption("Master not configured.")
+    else:
+        tabs = {
+            "Calls": "CALLS",
+            "Leads/PNCs": "LEADS",
+            "Initial Consultation": "INIT",
+            "Discovery Meeting": "DISC",
+            "New Client List": "NCL",
+        }
+        colA, colB = st.columns([2,1])
+        sel_label = colA.selectbox("Select sheet", list(tabs.keys()))
+        key = tabs[sel_label]
+
+        # Month purge (for date-bearing datasets)
+        col1, col2 = st.columns(2)
+        yr = col1.number_input("Year", min_value=2000, max_value=2100, value=dt.date.today().year, step=1)
+        mo = col2.number_input("Month", min_value=1, max_value=12, value=dt.date.today().month, step=1)
+
+        def _purge_month(logical_key: str, year: int, month: int) -> bool:
+            df = _read_ws_by_name(logical_key)
+            if df.empty: return True
+            # Figure out which date column to filter by
+            date_col = None
+            if logical_key == "NCL":
+                date_col = "Date we had BOTH the signed CLA and full payment"
+            elif logical_key == "INIT":
+                date_col = "Initial Consultation With Pji Law"
+            elif logical_key == "DISC":
+                date_col = "Discovery Meeting With Pji Law"
+            elif logical_key == "CALLS":
+                # CALLS is keyed by Month-Year
+                mkey = f"{year}-{month:02d}"
+                df = df.loc[df["Month-Year"] != mkey]
+                return _write_ws_by_name(logical_key, df)
+            else:
+                # LEADS has no canonical date; nothing to purge by month
+                return False
+
+            if date_col not in df.columns:
+                return False
+            s = pd.to_datetime(df[date_col], errors="coerce")
+            keep = ~((s.dt.year == year) & (s.dt.month == month))
+            df2 = df.loc[keep].copy()
+            return _write_ws_by_name(logical_key, df2)
+
+        if colB.button("Purge Month"):
+            ok = _purge_month(key, int(yr), int(mo))
+            st.success("Month purged.") if ok else st.warning("Nothing purged (missing date column or empty).")
+
+        st.divider()
+        if st.button(f"⚠️ Wipe ALL rows in '{sel_label}'"):
+            _write_ws_by_name(key, pd.DataFrame())
+            st.success(f"All rows wiped in '{sel_label}'.")
+
