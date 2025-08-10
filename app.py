@@ -1,13 +1,7 @@
 # app.py
-# ---------------------------
-# PJI Law • Call Reports + Conversion Report (Streamlit)
-# - Auth via streamlit-authenticator (version-tolerant wrapper: works with 0.3.x and 0.4.x+)
-# - Calls module: upload Zoom CSVs, de-dupe, optional Google Sheets master (Zoom_Calls),
-#   filters, charts (default minimized)
-# - Conversion Report: uploads via date range (Reporter-only expander),
-#   KPIs filtered by Year/Month pick list, optional Google Sheets master for 4 datasets
-# - No secrets in repo; secrets via Streamlit Secrets
-# ---------------------------
+# PJI Law • Call + Conversion Reports (Streamlit)
+# - Auth (version-tolerant) • Google Sheets master (5 worksheets) • Calls persisted too
+# - Reporter-only upload UI (minimizable) • Calls charts minimized • Conversion results Month/Year filters
 
 import io
 import re
@@ -20,9 +14,9 @@ import streamlit as st
 import yaml
 import streamlit_authenticator as stauth
 
-# =========================
-# 🔐 AUTHENTICATION (version-tolerant)
-# =========================
+# ───────────────────────────────────────────────────────────────────────────────
+# Auth (version-tolerant)
+# ───────────────────────────────────────────────────────────────────────────────
 st.set_page_config(page_title="PJI Law Reports", page_icon="📈", layout="wide")
 
 try:
@@ -35,10 +29,7 @@ try:
         config.get("preauthorized", {}).get("emails", []),
     )
 
-    # ---- version-tolerant login wrapper (works with 0.3.x and 0.4.x+) ----
     def _login_compat(authenticator_obj):
-        """Return (name, auth_status, username) across authenticator versions."""
-        # Try NEW API first (fields=..., location=...)
         try:
             res = authenticator_obj.login(
                 fields={"Form name": "Login", "Username": "Username", "Password": "Password"},
@@ -54,7 +45,6 @@ try:
             pass
         except Exception:
             pass
-        # Fallback: OLD API ('form_name', 'location')
         try:
             return authenticator_obj.login("Login", "main")
         except TypeError:
@@ -74,9 +64,24 @@ except Exception as e:
     st.error("Authentication is not configured correctly. Check your **Secrets**.")
     st.exception(e); st.stop()
 
-# =============================================================================
-#                         OPTIONAL GOOGLE SHEETS MASTER STORE
-# =============================================================================
+# ───────────────────────────────────────────────────────────────────────────────
+# Google Sheets master (one spreadsheet URL, five worksheets/tabs)
+# ───────────────────────────────────────────────────────────────────────────────
+TAB_NAMES = {
+    "CALLS": "Call_Report_Master",
+    "LEADS": "Leads_PNCs_Master",
+    "INIT":  "Initial_Consultation_Master",
+    "DISC":  "Discovery_Meeting_Master",
+    "NCL":   "New_Client_List_Master",
+}
+# Backward-compat: old tab names we might still read if present
+TAB_FALLBACKS = {
+    "CALLS": ["Zoom_Calls"],
+    "LEADS": ["Leads_PNCs"],
+    "INIT":  ["Initial_Consultation"],
+    "DISC":  ["Discovery_Meeting"],
+    "NCL":   ["New_Clients", "New Client List"],
+}
 
 def _gsheet_client():
     try:
@@ -86,7 +91,7 @@ def _gsheet_client():
         ms = st.secrets.get("master_store", None)
         if not sa or not ms or "sheet_url" not in ms:
             return None, None
-        scopes = ["https://www.googleapis.com/auth/spreadsheets"]  # Sheets-only scope
+        scopes = ["https://www.googleapis.com/auth/spreadsheets"]  # Sheets-only scope (safer)
         creds = Credentials.from_service_account_info(sa, scopes=scopes)
         gc = gspread.authorize(creds)
         sh = gc.open_by_url(ms["sheet_url"])
@@ -97,25 +102,38 @@ def _gsheet_client():
 
 GC, GSHEET = _gsheet_client()
 
-def _ws(name: str):
+def _ws(title: str):
     if GSHEET is None: return None
     try:
-        return GSHEET.worksheet(name)
+        return GSHEET.worksheet(title)
     except Exception:
+        # Try fallbacks if any
+        for fb in TAB_FALLBACKS.get(title, []):
+            try:
+                return GSHEET.worksheet(fb)
+            except Exception:
+                pass
+        # Create if missing
         try:
-            GSHEET.add_worksheet(title=name, rows=1000, cols=26)
-            return GSHEET.worksheet(name)
+            GSHEET.add_worksheet(title=title, rows=1000, cols=26)
+            return GSHEET.worksheet(title)
         except Exception as e:
-            st.error(f"Could not access/create worksheet '{name}': {e}")
+            st.error(f"Could not access/create worksheet '{title}': {e}")
             return None
 
-def _read_ws(ws) -> pd.DataFrame:
-    if ws is None: return pd.DataFrame()
+def _read_ws_by_name(logical_key: str) -> pd.DataFrame:
+    """Read current tab; try fallback names first; always return DataFrame (possibly empty)."""
+    if GSHEET is None: return pd.DataFrame()
+    # Try preferred name
+    ws = _ws(TAB_NAMES[logical_key])
+    if ws is None:
+        # we've already tried create; nothing else to do
+        return pd.DataFrame()
     try:
         import gspread_dataframe as gd
         df = gd.get_as_dataframe(ws, evaluate_formulas=True, dtype=str)
         df = df.loc[:, ~df.columns.str.contains("^Unnamed")]
-        # best-effort datetime parsing
+        # parse any likely date columns
         for c in df.columns:
             cl = c.lower()
             if "date" in cl or "with pji law" in cl:
@@ -125,100 +143,38 @@ def _read_ws(ws) -> pd.DataFrame:
         st.error(f"Read failed for '{ws.title}': {e}")
         return pd.DataFrame()
 
-def _unique_key(df: pd.DataFrame, dataset: str) -> pd.Series:
-    # Stable dedupe keys per dataset
-    if dataset == "Leads_PNCs":
-        parts = [df.get("Email",""), df.get("Matter ID",""),
-                 df.get("Stage",""),
-                 df.get("Initial Consultation With Pji Law",""),
-                 df.get("Discovery Meeting With Pji Law","")]
-    elif dataset == "New_Clients":
-        parts = [df.get("Client Name",""), df.get("Matter Number/Link",""),
-                 df.get("Date we had BOTH the signed CLA and full payment",""),
-                 df.get("Retained With Consult (Y/N)", df.get("Retained with Consult (Y/N)", ""))]
-    elif dataset == "Initial_Consultation":
-        parts = [df.get("Email",""), df.get("Matter ID",""),
-                 df.get("Initial Consultation With Pji Law",""),
-                 df.get("Sub Status","")]
-    elif dataset == "Discovery_Meeting":
-        parts = [df.get("Email",""), df.get("Matter ID",""),
-                 df.get("Discovery Meeting With Pji Law",""),
-                 df.get("Sub Status","")]
-    elif dataset == "Zoom_Calls":
-        parts = [df.get("Month-Year",""), df.get("Name",""), df.get("Category","")]
-        concat = (pd.Series(parts[0]).astype(str).str.strip() + "|" +
-                  pd.Series(parts[1]).astype(str).str.strip() + "|" +
-                  pd.Series(parts[2]).astype(str).str.strip())
-        return pd.util.hashing.hash_pandas_object(concat, index=False).astype(str)
-    else:
-        parts = [df.astype(str).agg("-".join, axis=1)]
-        return pd.util.hashing.hash_pandas_object(pd.DataFrame({"k": parts[0]}), index=False).astype(str)
-
-    concat = (pd.Series(parts[0]).astype(str).str.strip() + "|" +
-              pd.Series(parts[1]).astype(str).str.strip() + "|" +
-              pd.Series(parts[2]).astype(str) + "|" +
-              pd.Series(parts[3]).astype(str) + "|" +
-              pd.Series(parts[4]).astype(str))
-    return pd.util.hashing.hash_pandas_object(concat, index=False).astype(str)
-
-def _upsert_master(dataset_name: str, df_new: pd.DataFrame, keycol: str = "__key__", month_scope: Optional[Tuple[pd.Timestamp,pd.Timestamp]]=None):
-    ws = _ws(dataset_name)
-    if ws is None:
-        st.warning(f"Master store not configured; running in session-only mode.")
-        return False
-
-    df_new = df_new.copy()
-    df_new.columns = [str(c).strip() for c in df_new.columns]
-    # Normalize label variant for NCL
-    if dataset_name == "New_Clients" and "Retained with Consult (Y/N)" in df_new.columns and "Retained With Consult (Y/N)" not in df_new.columns:
-        df_new = df_new.rename(columns={"Retained with Consult (Y/N)":"Retained With Consult (Y/N)"})
-
-    df_master = _read_ws(ws)
-
-    df_new[keycol] = _unique_key(df_new, dataset_name)
-    if not df_master.empty and keycol not in df_master.columns:
-        df_master[keycol] = _unique_key(df_master, dataset_name)
-
-    # Optional purge of month in date-bearing datasets
-    if month_scope is not None and not df_master.empty:
-        start, end = month_scope
-        date_col = None
-        if dataset_name == "New_Clients":
-            date_col = "Date we had BOTH the signed CLA and full payment"
-        elif dataset_name == "Initial_Consultation":
-            date_col = "Initial Consultation With Pji Law"
-        elif dataset_name == "Discovery_Meeting":
-            date_col = "Discovery Meeting With Pji Law"
-        # Zoom_Calls is aggregated by Month-Year; we skip date-based purge
-        if date_col and date_col in df_master.columns:
-            m = pd.to_datetime(df_master[date_col], errors="coerce").between(start, end)
-            df_master = df_master.loc[~m].copy()
-
-    combined = pd.concat([df_master, df_new], ignore_index=True)
-    combined = combined.drop_duplicates(subset=[keycol], keep="last")
-
+def _write_ws_by_name(logical_key: str, df: pd.DataFrame):
+    ws = _ws(TAB_NAMES[logical_key])
+    if ws is None or df is None: return False
     try:
         import gspread_dataframe as gd
         ws.clear()
-        gd.set_with_dataframe(ws, combined.drop(columns=[keycol], errors="ignore"),
-                              include_index=False, include_column_header=True)
+        gd.set_with_dataframe(ws, df.reset_index(drop=True), include_index=False, include_column_header=True)
         return True
     except Exception as e:
-        st.error(f"Upsert failed for '{dataset_name}': {e}")
+        st.error(f"Write failed for '{TAB_NAMES[logical_key]}': {e}")
         return False
 
-def _maybe_master(tab_name: str, fallback_df: Optional[pd.DataFrame]) -> Optional[pd.DataFrame]:
-    ws = _ws(tab_name)
-    if ws is None:
-        return fallback_df
-    dfm = _read_ws(ws)
-    return (dfm if not dfm.empty else fallback_df)
+def _append_ws_by_name(logical_key: str, df: pd.DataFrame):
+    ws = _ws(TAB_NAMES[logical_key])
+    if ws is None or df is None or df.empty: return False
+    try:
+        import gspread_dataframe as gd
+        data = ws.get_all_values()
+        if len(data) == 0:
+            gd.set_with_dataframe(ws, df.reset_index(drop=True), include_index=False, include_column_header=True)
+        else:
+            start_row = len(data) + 1
+            gd.set_with_dataframe(ws, df.reset_index(drop=True), row=start_row,
+                                  include_index=False, include_column_header=False)
+        return True
+    except Exception as e:
+        st.error(f"Append failed for '{TAB_NAMES[logical_key]}': {e}")
+        return False
 
-# =============================================================================
-#                                  CALLS MODULE
-# =============================================================================
-
-# Constants & mappings (Calls)
+# ───────────────────────────────────────────────────────────────────────────────
+# Calls processing
+# ───────────────────────────────────────────────────────────────────────────────
 REQUIRED_COLUMNS_CALLS: List[str] = [
     "Name", "Total Calls", "Completed Calls", "Outgoing", "Received",
     "Forwarded to Voicemail", "Answered by Other", "Missed",
@@ -244,12 +200,14 @@ OUT_COLUMNS_CALLS = [
     "Avg Call Time","Total Call Time","Total Hold Time","Month-Year"
 ]
 
-def _to_seconds(series: pd.Series) -> pd.Series:
-    td = pd.to_timedelta(series, errors="coerce")
-    return td.dt.total_seconds().fillna(0.0)
-
 def _fmt_hms(seconds: pd.Series) -> pd.Series:
     return seconds.round().astype(int).map(lambda s: str(dt.timedelta(seconds=s)))
+
+def file_md5(uploaded_file) -> str:
+    pos = uploaded_file.tell()
+    uploaded_file.seek(0); data = uploaded_file.read()
+    uploaded_file.seek(pos if pos is not None else 0)
+    return hashlib.md5(data).hexdigest()
 
 def month_key_from_range(start: dt.date, end: dt.date) -> str:
     return f"{start.year}-{start.month:02d}"
@@ -258,15 +216,8 @@ def validate_single_month_range(start: dt.date, end: dt.date) -> Tuple[bool, str
     if start > end:
         return False, "Start date must be on or before End date."
     if (start.year, start.month) != (end.year, end.month):
-        return False, "Please select a range within a single calendar month (e.g., 1–31 July 2025)."
+        return False, "Please select a range within a single calendar month."
     return True, ""
-
-def file_md5(uploaded_file) -> str:
-    pos = uploaded_file.tell()
-    uploaded_file.seek(0)
-    data = uploaded_file.read()
-    uploaded_file.seek(pos if pos is not None else 0)
-    return hashlib.md5(data).hexdigest()
 
 def process_calls_csv(raw: pd.DataFrame, period_key: str) -> pd.DataFrame:
     def norm(s: str) -> str:
@@ -296,18 +247,19 @@ def process_calls_csv(raw: pd.DataFrame, period_key: str) -> pd.DataFrame:
                 rename_map[actual] = canonical; used.add(actual); break
     df = raw.rename(columns=rename_map).copy()
 
-    def sum_if_present(cols, target):
-        present = [c for c in cols if c in df.columns]
-        if present:
-            base = pd.to_numeric(df.get(target, 0), errors="coerce").fillna(0)
-            for c in present:
-                base = base + pd.to_numeric(df[c], errors="coerce").fillna(0)
-            df[target] = base
+    # combine split incoming/outgoing if present
     def norm2(s: str) -> str:
         return re.sub(r"[^a-z0-9 ]","",re.sub(r"[\s_]+"," ",s.strip().lower()))
     incoming = [c for c in raw.columns if norm2(c) in {"incoming internal","incoming external","incoming"}]
     outgoing = [c for c in raw.columns if norm2(c) in {"outgoing internal","outgoing external","outgoing"}]
-    sum_if_present(incoming, "Received"); sum_if_present(outgoing, "Outgoing")
+    if incoming:
+        base = pd.to_numeric(df.get("Received", 0), errors="coerce").fillna(0)
+        for c in incoming: base += pd.to_numeric(df.get(c, 0), errors="coerce").fillna(0)
+        df["Received"] = base
+    if outgoing:
+        base = pd.to_numeric(df.get("Outgoing", 0), errors="coerce").fillna(0)
+        for c in outgoing: base += pd.to_numeric(df.get(c, 0), errors="coerce").fillna(0)
+        df["Outgoing"] = base
 
     missing = [c for c in REQUIRED_COLUMNS_CALLS if c not in df.columns]
     if missing:
@@ -321,7 +273,7 @@ def process_calls_csv(raw: pd.DataFrame, period_key: str) -> pd.DataFrame:
     for c in ["Total Calls","Completed Calls","Outgoing","Received","Forwarded to Voicemail","Answered by Other","Missed"]:
         df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0).astype(int)
 
-    df["_avg_sec"] = pd.to_timedelta(df["Avg Call Time"], errors="coerce").dt.total_seconds().fillna(0.0)
+    df["_avg_sec"]   = pd.to_timedelta(df["Avg Call Time"], errors="coerce").dt.total_seconds().fillna(0.0)
     df["_total_sec"] = pd.to_timedelta(df["Total Call Time"], errors="coerce").dt.total_seconds().fillna(0.0)
     df["_hold_sec"]  = pd.to_timedelta(df["Total Hold Time"], errors="coerce").dt.total_seconds().fillna(0.0)
     df["Month-Year"] = period_key
@@ -356,6 +308,9 @@ def process_calls_csv(raw: pd.DataFrame, period_key: str) -> pd.DataFrame:
                "__avg_sec","__total_sec","__hold_sec"]].sort_values(["Category","Name"]).reset_index(drop=True)
     return out
 
+# ───────────────────────────────────────────────────────────────────────────────
+# UI — Calls
+# ───────────────────────────────────────────────────────────────────────────────
 st.title("📞 Zoom Call Reports")
 
 def upload_section(section_id: str, title: str) -> Tuple[str, object]:
@@ -367,21 +322,15 @@ def upload_section(section_id: str, title: str) -> Tuple[str, object]:
 
     c1, c2 = st.columns(2)
     start = c1.date_input("Start date", value=first_of_month, key=f"{section_id}_start")
-    end   = c2.date_input("End date", value=last_of_month, key=f"{section_id}_end")
+    end   = c2.date_input("End date", value=last_of_month,   key=f"{section_id}_end")
     ok, msg = validate_single_month_range(start, end)
     if not ok:
         st.error(msg); st.stop()
     period_key = month_key_from_range(start, end)
 
-    uploaded = st.file_uploader(f"Choose {title} CSV", type=["csv"], key=f"{section_id}_uploader")
+    uploaded = st.file_uploader(f"Upload {title} CSV", type=["csv"], key=f"{section_id}_uploader")
     st.divider()
     return period_key, uploaded
-
-# Session state for Calls
-if "batches_calls" not in st.session_state:
-    st.session_state["batches_calls"] = []
-if "hashes_calls" not in st.session_state:
-    st.session_state["hashes_calls"] = set()
 
 # Reporter access control for uploaders
 is_reporter = True
@@ -391,9 +340,12 @@ try:
 except Exception:
     pass
 
+# Session for de-duping uploads this run
+if "hashes_calls" not in st.session_state: st.session_state["hashes_calls"] = set()
+
 if is_reporter:
     with st.expander("🛠️ Reporter: Upload data (Calls & Conversion)", expanded=False):
-        # Calls uploader
+        # Calls
         calls_period_key, calls_uploader = upload_section("zoom_calls", "Zoom Calls")
         if calls_uploader:
             try:
@@ -403,41 +355,40 @@ if is_reporter:
                 else:
                     raw = pd.read_csv(calls_uploader)
                     processed = process_calls_csv(raw, calls_period_key)
-                    st.session_state["batches_calls"].append(processed)
-                    st.session_state["hashes_calls"].add(fhash)
-                    st.success(f"Calls: loaded {len(processed)} row(s) for {calls_period_key}.")
-
-                    # Append Calls to master (optional)
-                    if st.checkbox("Append Calls upload to Master (deduped)", value=False, key="append_calls_now"):
-                        if GSHEET is None:
-                            st.warning("Master store not configured; cannot append Calls.")
+                    # Persist to master immediately (deduped)
+                    if GSHEET is None:
+                        st.warning("Master store not configured; Calls stored for this session only.")
+                        df_calls_master = processed.copy()
+                    else:
+                        # Read current, dedupe, write back
+                        current = _read_ws_by_name("CALLS")
+                        if not current.empty:
+                            # keep numeric/datetime as strings where needed
+                            combined = pd.concat([current, processed], ignore_index=True)
                         else:
-                            y, m = calls_period_key.split("-")
-                            start = pd.Timestamp(int(y), int(m), 1)
-                            end = (start + pd.offsets.MonthEnd(1))
-                            ok_calls = _upsert_master("Zoom_Calls", processed, month_scope=(start, end))
-                            st.success("Calls master updated.") if ok_calls else st.warning("Calls master update failed.")
+                            combined = processed.copy()
+                        # Dedupe key: Month-Year + Name + Category
+                        key = (combined["Month-Year"].astype(str).str.strip() + "|" +
+                               combined["Name"].astype(str).str.strip() + "|" +
+                               combined["Category"].astype(str).str.strip())
+                        combined = combined.loc[~key.duplicated(keep="last")].copy()
+                        _write_ws_by_name("CALLS", combined)
+                        st.success(f"Calls: upserted {len(processed)} row(s) into '{TAB_NAMES['CALLS']}'.")
+                        df_calls_master = combined.copy()
+                    st.session_state["hashes_calls"].add(fhash)
             except Exception as e:
                 st.error("Could not parse Calls CSV."); st.exception(e)
 else:
     st.info("Viewer mode: upload controls are hidden (Reporter-only).")
 
-# Combine Calls from session
-if st.session_state["batches_calls"]:
-    df_calls = pd.concat(st.session_state["batches_calls"], ignore_index=True)
-else:
-    df_calls = pd.DataFrame(columns=OUT_COLUMNS_CALLS + ["__avg_sec","__total_sec","__hold_sec"])
+# Load Calls (always from master if configured; else empty)
+df_calls = _read_ws_by_name("CALLS") if GSHEET is not None else locals().get("df_calls_master", pd.DataFrame())
+if df_calls is None: df_calls = pd.DataFrame()
+if df_calls.empty:
+    st.info("No Calls data available yet. Reporter must upload and/or configure the Master Store.")
 
-# Prefer master Zoom_Calls for accumulation
-df_calls = _maybe_master("Zoom_Calls", df_calls)
-if df_calls is None:
-    df_calls = pd.DataFrame(columns=OUT_COLUMNS_CALLS + ["__avg_sec","__total_sec","__hold_sec"])
-
-# ---------------------------
-# Calls Filters (Year/Month, Category, Name)
-# ---------------------------
+# Calls filters
 st.subheader("Filters — Calls")
-def with_all(options): return ["All"] + sorted(options)
 months_map = {"01":"January","02":"February","03":"March","04":"April","05":"May","06":"June",
               "07":"July","08":"August","09":"September","10":"October","11":"November","12":"December"}
 def month_num_to_name(mnum): return months_map.get(mnum, mnum)
@@ -457,9 +408,8 @@ else:
 
 c1, c2, c3, c4 = st.columns(4)
 years = sorted({m.split("-")[0] for m in all_months})
-year_options = ["All"] + years
-sel_year = c1.selectbox("Year", year_options if year_options else ["All"],
-                        index=(year_options.index(latest_year) if latest_year in year_options else 0))
+year_options = ["All"] + years if years else ["All"]
+sel_year = c1.selectbox("Year", year_options, index=(year_options.index(latest_year) if latest_year in year_options else 0))
 
 def months_for_year(year_sel: str):
     if year_sel == "All":
@@ -472,10 +422,10 @@ month_options = ["All"] + mnames if mnames else ["All"]
 sel_month_name = c2.selectbox("Month", month_options,
                               index=(month_options.index(latest_mname) if latest_mname in month_options else 0))
 
-cat_choices = with_all(df_calls["Category"].unique().tolist()) if not df_calls.empty else ["All"]
+cat_choices = ["All"] + sorted(df_calls["Category"].unique().tolist()) if not df_calls.empty else ["All"]
 sel_cat = c3.selectbox("Category", cat_choices, index=0)
 base = df_calls if sel_cat == "All" else df_calls[df_calls["Category"] == sel_cat]
-name_choices = with_all(base["Name"].unique().tolist()) if not base.empty else ["All"]
+name_choices = ["All"] + sorted(base["Name"].unique().tolist()) if not base.empty else ["All"]
 sel_name = c4.selectbox("Name", name_choices, index=0)
 
 def calls_period_mask(df: pd.DataFrame) -> pd.Series:
@@ -496,18 +446,20 @@ if sel_cat != "All":  mask_calls_extra &= filtered_calls["Category"] == sel_cat
 if sel_name != "All": mask_calls_extra &= filtered_calls["Name"] == sel_name
 view_calls = filtered_calls.loc[mask_calls_extra].copy()
 
-# Calls results + download
 st.subheader("Calls — Results")
 calls_display_cols = [
     "Category","Name","Total Calls","Completed Calls","Outgoing","Received",
     "Forwarded to Voicemail","Answered by Other","Missed",
     "Avg Call Time","Total Call Time","Total Hold Time","Month-Year"
 ]
-st.dataframe(view_calls[calls_display_cols], hide_index=True, use_container_width=True)
-csv_buf = io.StringIO()
-view_calls[calls_display_cols].to_csv(csv_buf, index=False)
-st.download_button("Download filtered Calls CSV", csv_buf.getvalue(),
-                   file_name="call_report_filtered.csv", type="primary")
+if not view_calls.empty:
+    st.dataframe(view_calls[calls_display_cols], hide_index=True, use_container_width=True)
+    csv_buf = io.StringIO()
+    view_calls[calls_display_cols].to_csv(csv_buf, index=False)
+    st.download_button("Download filtered Calls CSV", csv_buf.getvalue(),
+                       file_name="call_report_filtered.csv", type="primary")
+else:
+    st.info("No rows match the current Calls filters.")
 
 # Calls — Visualizations (default minimized)
 st.subheader("Calls — Visualizations")
@@ -516,11 +468,9 @@ try:
     plotly_ok = True
 except Exception:
     plotly_ok = False
-    st.info("Charts are unavailable because Plotly isn’t installed. Add `plotly>=5.22` to requirements.txt.")
+    st.info("Charts unavailable (install `plotly>=5.22` in requirements.txt).")
 
-if view_calls.empty:
-    st.info("No Calls data for the selected filters.")
-elif plotly_ok:
+if not view_calls.empty and plotly_ok:
     vol = (view_calls.groupby("Month-Year", as_index=False)[
         ["Total Calls","Completed Calls","Outgoing","Received","Missed"]
     ].sum())
@@ -555,20 +505,17 @@ elif plotly_ok:
                       labels={"Avg Minutes":"Minutes","Name":"Staff"})
         st.plotly_chart(fig3, use_container_width=True)
 
-# =============================================================================
-#                           CONVERSION REPORT (RESULT FILTERS BY MONTH/YEAR)
-# =============================================================================
-
+# ───────────────────────────────────────────────────────────────────────────────
+# Conversion Report (Master-backed, Month/Year result filters)
+# ───────────────────────────────────────────────────────────────────────────────
 st.markdown("---")
 st.header("Conversion Report")
 
-# ----- Uploaders for Conversion (Reporter expander; still date-range for uploads) -----
 def _read_any(upload):
     if upload is None: return None
     name = (upload.name or "").lower()
     if name.endswith(".csv"):
-        try:
-            df = pd.read_csv(upload)
+        try: df = pd.read_csv(upload)
         except Exception:
             upload.seek(0); df = pd.read_csv(upload, engine="python")
         df.columns = [str(c).strip() for c in df.columns]; return df
@@ -579,15 +526,12 @@ def _read_any(upload):
             df = pd.read_excel(upload, engine="xlrd")
         else:
             df = pd.read_excel(upload)
-    except ImportError as e:
-        need = "openpyxl" if name.endswith(".xlsx") else "xlrd"
-        st.error(f"Excel support not available for `{upload.name}`. Add `{need}` to requirements.txt or upload CSV.")
-        raise
     except Exception:
-        upload.seek(0)
-        df = pd.read_excel(upload)
+        upload.seek(0); df = pd.read_excel(upload)
     df.columns = [str(c).strip() for c in df.columns]
     return df
+
+if "hashes_conv" not in st.session_state: st.session_state["hashes_conv"] = set()
 
 if is_reporter:
     with st.expander("🛠️ Reporter: Upload Conversion files (date range for uploads)", expanded=False):
@@ -598,46 +542,77 @@ if is_reporter:
             st.error("Upload start must be on or before end."); st.stop()
 
         up_leads = st.file_uploader("Upload **Leads_PNCs**", type=["csv","xls","xlsx"], key="up_leads_pncs")
-        up_ncl   = st.file_uploader("Upload **New Clients List**", type=["csv","xls","xlsx"], key="up_ncl")
         up_init  = st.file_uploader("Upload **Initial_Consultation**", type=["csv","xls","xlsx"], key="up_initial")
         up_disc  = st.file_uploader("Upload **Discovery_Meeting**", type=["csv","xls","xlsx"], key="up_discovery")
+        up_ncl   = st.file_uploader("Upload **New Client List**", type=["csv","xls","xlsx"], key="up_ncl")
 
-        df_leads_up = _read_any(up_leads)
-        df_ncl_up   = _read_any(up_ncl)
-        df_init_up  = _read_any(up_init)
-        df_disc_up  = _read_any(up_disc)
+        uploads = {
+            "LEADS": up_leads,
+            "INIT":  up_init,
+            "DISC":  up_disc,
+            "NCL":   up_ncl,
+        }
+        for key, upl in uploads.items():
+            if not upl: continue
+            try:
+                fhash = file_md5(upl)
+                if fhash in st.session_state["hashes_conv"]:
+                    st.warning(f"{key}: duplicate file — ignored."); continue
+                df_up = _read_any(upl)
+                if df_up is None or df_up.empty:
+                    st.warning(f"{key}: file appears empty."); continue
 
-        # Append to master if requested
-        append_now = st.checkbox("Append these uploads to the Master Store (deduped)", value=False)
-        if append_now:
-            month_scope = (pd.Timestamp(upload_start).replace(day=1),
-                           (pd.Timestamp(upload_start).replace(day=28) + pd.Timedelta(days=4)).replace(day=1) - pd.Timedelta(days=1))
-            ok = True
-            if isinstance(df_leads_up, pd.DataFrame): ok &= _upsert_master("Leads_PNCs", df_leads_up)
-            if isinstance(df_ncl_up,   pd.DataFrame): ok &= _upsert_master("New_Clients", df_ncl_up, month_scope=month_scope)
-            if isinstance(df_init_up,  pd.DataFrame): ok &= _upsert_master("Initial_Consultation", df_init_up, month_scope=month_scope)
-            if isinstance(df_disc_up,  pd.DataFrame): ok &= _upsert_master("Discovery_Meeting",   df_disc_up, month_scope=month_scope)
-            st.success("Masters updated (deduped).") if ok else st.warning("Some master updates failed — see messages above.")
+                # Normalize key variants for NCL flag column
+                if key == "NCL" and "Retained with Consult (Y/N)" in df_up.columns and "Retained With Consult (Y/N)" not in df_up.columns:
+                    df_up = df_up.rename(columns={"Retained with Consult (Y/N)":"Retained With Consult (Y/N)"})
 
-# ----- Read effective data sources for Conversion (prefer master; fallback to last uploads if available) -----
-df_leads = _maybe_master("Leads_PNCs", None)
-df_ncl   = _maybe_master("New_Clients", None)
-df_init  = _maybe_master("Initial_Consultation", None)
-df_disc  = _maybe_master("Discovery_Meeting", None)
+                # Read current master
+                current = _read_ws_by_name(key)
+                combined = pd.concat([current, df_up], ignore_index=True) if not current.empty else df_up.copy()
 
-# if master isn't configured or empty, try to use the last uploaded (if any)
-if df_leads is None: df_leads = 'df_leads_up' in locals() and isinstance(df_leads_up, pd.DataFrame) and df_leads_up or None
-if df_ncl   is None: df_ncl   = 'df_ncl_up'   in locals() and isinstance(df_ncl_up,   pd.DataFrame) and df_ncl_up   or None
-if df_init  is None: df_init  = 'df_init_up'  in locals() and isinstance(df_init_up,  pd.DataFrame) and df_init_up  or None
-if df_disc  is None: df_disc  = 'df_disc_up'  in locals() and isinstance(df_disc_up,  pd.DataFrame) and df_disc_up  or None
+                # Dedupe keys per dataset
+                if key == "LEADS":
+                    k = (combined.get("Email","").astype(str).str.strip() + "|" +
+                         combined.get("Matter ID","").astype(str).str.strip() + "|" +
+                         combined.get("Stage","").astype(str).str.strip() + "|" +
+                         combined.get("Initial Consultation With Pji Law","").astype(str) + "|" +
+                         combined.get("Discovery Meeting With Pji Law","").astype(str))
+                elif key == "INIT":
+                    k = (combined.get("Email","").astype(str).str.strip() + "|" +
+                         combined.get("Matter ID","").astype(str).str.strip() + "|" +
+                         combined.get("Initial Consultation With Pji Law","").astype(str) + "|" +
+                         combined.get("Sub Status","").astype(str).str.strip())
+                elif key == "DISC":
+                    k = (combined.get("Email","").astype(str).str.strip() + "|" +
+                         combined.get("Matter ID","").astype(str).str.strip() + "|" +
+                         combined.get("Discovery Meeting With Pji Law","").astype(str) + "|" +
+                         combined.get("Sub Status","").astype(str).str.strip())
+                else:  # NCL
+                    k = (combined.get("Client Name","").astype(str).str.strip() + "|" +
+                         combined.get("Matter Number/Link","").astype(str).str.strip() + "|" +
+                         combined.get("Date we had BOTH the signed CLA and full payment","").astype(str) + "|" +
+                         combined.get("Retained With Consult (Y/N)","").astype(str).str.strip())
+                combined = combined.loc[~k.duplicated(keep="last")].copy()
 
-if not all([isinstance(df, pd.DataFrame) for df in [df_leads, df_ncl, df_init, df_disc]]):
-    st.info("No Conversion data available yet. Reporter must upload files or configure the Master Store.")
-    st.stop()
+                _write_ws_by_name(key, combined)
+                st.success(f"{key}: upserted {len(df_up)} row(s) into '{TAB_NAMES[key]}'.")
+                st.session_state["hashes_conv"].add(fhash)
+            except Exception as e:
+                st.error(f"{key}: upload failed."); st.exception(e)
 
-# ----- Conversion Filters — Year/Month (for results) -----
+# Load masters (or empty)
+df_leads = _read_ws_by_name("LEADS")
+df_init  = _read_ws_by_name("INIT")
+df_disc  = _read_ws_by_name("DISC")
+df_ncl   = _read_ws_by_name("NCL")
+
+if any(df is None for df in [df_leads, df_init, df_disc, df_ncl]):
+    st.info("Conversion masters not available yet."); st.stop()
+
+# Conversion filters — Month/Year for results
 months_map = {"01":"January","02":"February","03":"March","04":"April","05":"May","06":"June",
               "07":"July","08":"August","09":"September","10":"October","11":"November","12":"December"}
+def month_num_to_name(n): return months_map.get(n, n)
 
 def _extract_months_from(df: pd.DataFrame, date_cols: list[str]) -> set[str]:
     if df is None or df.empty: return set()
@@ -660,10 +635,7 @@ if conv_months:
     cyr, cmo = st.columns(2)
     sel_year_conv = cyr.selectbox("Year (Conversion)", ["All"] + years,
                                   index=(years.index(latest_my.split("-")[0])+1 if latest_my.split("-")[0] in years else 0))
-    def month_num_to_name(n): return months_map.get(n, n)
-    def months_for_year(y):
-        return sorted({m.split("-")[1] for m in conv_months if y == "All" or m.startswith(y)})
-
+    def months_for_year(y): return sorted({m.split("-")[1] for m in conv_months if y == "All" or m.startswith(y)})
     mnums = months_for_year(sel_year_conv)
     mnames = ["All"] + [month_num_to_name(m) for m in mnums]
     default_mname = month_num_to_name(latest_my.split("-")[1])
@@ -688,35 +660,28 @@ def _conv_mask_by_month(df: pd.DataFrame, date_col: str) -> pd.Series:
             mask &= s.dt.month.astype("Int64") == int(month_num)
     return mask & s.notna()
 
-# =========================
-# Compute Conversion KPIs (using Year/Month filter)
-# =========================
+# Compute KPIs
+# Validate shared columns (soft checks)
+def _soft_has(df, col): return (df is not None) and (col in df.columns)
 
-# Validate shared columns
-for df, label in [(df_leads,"Leads_PNCs"), (df_init,"Initial_Consultation"), (df_disc,"Discovery_Meeting")]:
-    needed = [
-        "First Name","Stage","Sub Status",
-        "Initial Consultation With Pji Law","Discovery Meeting With Pji Law"
-    ]
-    for col in needed:
-        if col not in df.columns:
-            st.error(f"[{label}] missing expected column `{col}`."); st.stop()
+needed_pairs = [
+    (df_leads,"Leads_PNCs","Stage"),
+    (df_init,"Initial_Consultation","Sub Status"),
+    (df_disc,"Discovery_Meeting","Sub Status"),
+]
+for df,label,col in needed_pairs:
+    if not _soft_has(df, col):
+        st.error(f"[{label}] missing expected column `{col}`."); st.stop()
+if not _soft_has(df_ncl, "Date we had BOTH the signed CLA and full payment"):
+    st.error("[New Client List] missing `Date we had BOTH the signed CLA and full payment`."); st.stop()
 
-# NCL flag column (tolerant)
-ncl_flag_col = None
-for candidate in ["Retained With Consult (Y/N)", "Retained with Consult (Y/N)"]:
-    if candidate in df_ncl.columns:
-        ncl_flag_col = candidate; break
-if "Date we had BOTH the signed CLA and full payment" not in df_ncl.columns:
-    st.error("[New Clients List] missing `Date we had BOTH the signed CLA and full payment`."); st.stop()
-
-# Row 1 — # of Leads (exclude Non-Lead)
+# Row 1 — Leads (exclude Non-Lead)
 row1 = int(df_leads.loc[
-    df_leads["Stage"].astype(str).str.strip() != "Marketing/Scam/Spam (Non-Lead)",
-    "First Name"
+    df_leads["Stage"].astype(str).str.strip() != "Marketing/Scam/Spam (Non-Lead"),
+    "Stage"
 ].shape[0])
 
-# Row 2 — # of PNCs (exclude the big set)
+# Row 2 — PNCs (exclude the specified set)
 EXCLUDED_PNC_STAGES = {
     "Marketing/Scam/Spam (Non-Lead)","Referred Out","No Stage","New Lead",
     "No Follow Up (No Marketing/Communication)","No Follow Up (Receives Marketing/Communication)",
@@ -726,10 +691,10 @@ EXCLUDED_PNC_STAGES = {
 }
 row2 = int(df_leads.loc[
     ~df_leads["Stage"].astype(str).str.strip().isin(EXCLUDED_PNC_STAGES),
-    "First Name"
+    "Stage"
 ].shape[0])
 
-# In-range subsets by Year/Month filter
+# Month filters for the three date-bearing datasets
 init_mask = _conv_mask_by_month(df_init, "Initial Consultation With Pji Law")
 disc_mask = _conv_mask_by_month(df_disc, "Discovery Meeting With Pji Law")
 ncl_mask  = _conv_mask_by_month(df_ncl,  "Date we had BOTH the signed CLA and full payment")
@@ -740,6 +705,9 @@ ncl_in  = df_ncl.loc[ncl_mask].copy()
 
 # Row 3 — retained without consult (flag == N)
 # Row 8 — retained after consult (anything not N)
+ncl_flag_col = None
+for candidate in ["Retained With Consult (Y/N)", "Retained with Consult (Y/N)"]:
+    if candidate in df_ncl.columns: ncl_flag_col = candidate; break
 if ncl_flag_col:
     flag_in = ncl_in[ncl_flag_col].astype(str).str.strip().str.upper()
     row3 = int((flag_in == "N").sum())
@@ -751,7 +719,7 @@ else:
 # Row 10 — total retained
 row10 = int(ncl_in.shape[0])
 
-# Row 4 — scheduled consults (Init + Discovery) — do NOT exclude "Follow Up"
+# Row 4 — scheduled consults = Init + Discovery (we are NOT excluding "Follow Up")
 row4 = int(init_in.shape[0] + disc_in.shape[0])
 
 # Row 6 — showed up for consultation (Sub Status == "Pnc")
@@ -760,17 +728,13 @@ row6 = int(
     + (disc_in["Sub Status"].astype(str).str.strip() == "Pnc").sum()
 )
 
-# Percentages
-def _pct(numer, denom):
-    if denom is None or denom == 0: return 0
-    return round((numer / denom) * 100)
+def _pct(numer, denom): return 0 if (denom is None or denom == 0) else round((numer/denom)*100)
 
-row5  = _pct(row4, (row2 - row3))   # % remaining PNCs who scheduled consult
-row7  = _pct(row6, row4)            # % scheduled who showed
-row9  = _pct(row8, row4)            # % retained after consult
-row11 = _pct(row10, row2)           # % total retained of PNCs
+row5  = _pct(row4, (row2 - row3))  # % remaining PNCs who scheduled consult
+row7  = _pct(row6, row4)           # % scheduled who showed
+row9  = _pct(row8, row4)           # % retained after consult
+row11 = _pct(row10, row2)          # % total retained of PNCs
 
-# Display Conversion Report
 kpi_rows = pd.DataFrame({
     "Metric": [
         "# of Leads",
@@ -780,23 +744,23 @@ kpi_rows = pd.DataFrame({
         "% of remaining PNCs who scheduled consult",
         "# of PNCs who showed up for consultation",
         "% of PNCs who scheduled consult showed up",
-        "# of PNCs who retained after scheduled consult",
+        "PNCs who retained after scheduled consult",
         "% of PNCs who retained after consult",
         "# of Total PNCs who retained",
         "% of total PNCs who retained",
     ],
     "Value": [
-        row1,row2,row3,row4,f"{row5}%",row6,f"{row7}%",row8,f"{row9}%",row10,f"{row11}%"
+        row1, row2, row3, row4, f"{row5}%", row6, f"{row7}%", row8, f"{row9}%", row10, f"{row11}%"
     ],
 })
 st.dataframe(kpi_rows, hide_index=True, use_container_width=True)
 
 with st.expander("Debug details (for reconciliation)", expanded=False):
     st.write("Leads_PNCs — Stage value counts", df_leads["Stage"].value_counts(dropna=False))
-    st.write("Initial_Consultation — Sub Status (in month filter)", init_in["Sub Status"].value_counts(dropna=False))
-    st.write("Discovery_Meeting — Sub Status (in month filter)",   disc_in["Sub Status"].value_counts(dropna=False))
+    st.write("Initial_Consultation — Sub Status (in filter)", init_in["Sub Status"].value_counts(dropna=False))
+    st.write("Discovery_Meeting — Sub Status (in filter)",   disc_in["Sub Status"].value_counts(dropna=False))
     if ncl_flag_col:
-        st.write("New Clients List — Retained split (in month filter)", ncl_in[ncl_flag_col].value_counts(dropna=False))
+        st.write("New Client List — Retained split (in filter)", ncl_in[ncl_flag_col].value_counts(dropna=False))
     st.write(
         f"Computed: Leads={row1}, PNCs={row2}, "
         f"Retained w/out consult={row3}, Scheduled={row4} ({row5}%), "
@@ -804,26 +768,10 @@ with st.expander("Debug details (for reconciliation)", expanded=False):
         f"Total retained={row10} ({row11}%)"
     )
 
-# --------- Sidebar Master controls (optional) ----------
+# Sidebar: Master admin (optional quick tools)
 with st.sidebar.expander("📦 Master Data (Google Sheets)", expanded=False):
     if GSHEET is None:
         st.caption("Not configured. Add `[gcp_service_account]` and `[master_store]` to Secrets.")
     else:
         st.success("Connected to Master Store (Google Sheets).")
-    st.caption("These actions update persistent master datasets. Deduping is automatic.")
-
-    today = dt.date.today()
-    mstart = st.date_input("Month scope start", value=today.replace(day=1), key="ms_start")
-    mend   = st.date_input("Month scope end",   value=(today.replace(day=28) + dt.timedelta(days=4)), key="ms_end")
-    mstart_ts, mend_ts = pd.Timestamp(mstart), pd.Timestamp(mend)
-
-    colA, colB = st.columns(2)
-    if colA.button("Purge month in NCL (master)"):
-        if _upsert_master("New_Clients", pd.DataFrame(), month_scope=(mstart_ts, mend_ts)):
-            st.success("Purged selected month in New_Clients.")
-    if colB.button("Wipe ALL masters"):
-        if GSHEET is not None:
-            for tab in ["Leads_PNCs", "New_Clients", "Initial_Consultation", "Discovery_Meeting", "Zoom_Calls"]:
-                ws = _ws(tab)
-                if ws: ws.clear()
-            st.success("All master tabs cleared.")
+        st.caption("Tabs used: " + ", ".join(TAB_NAMES.values()))
