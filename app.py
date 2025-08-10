@@ -825,3 +825,134 @@ with st.sidebar.expander("📦 Master Data (Google Sheets)", expanded=False):
     else:
         st.success("Connected to Master Store (Google Sheets).")
         st.caption("Tabs used: " + ", ".join(TAB_NAMES.values()))
+
+# ── Sidebar: Master Data + Admin maintenance tools ──
+with st.sidebar.expander("📦 Master Data (Google Sheets) — Admin", expanded=False):
+    if GSHEET is None:
+        st.caption("Not configured. Add `[gcp_service_account]` and `[master_store]` to Secrets.")
+    else:
+        st.success("Connected to Master Store (Google Sheets).")
+        st.caption("Tabs used: " + ", ".join(TAB_NAMES.values()))
+
+        # Sheet selector
+        sheets = {
+            "Calls": "CALLS",
+            "Leads/PNCs": "LEADS",
+            "Initial Consultation": "INIT",
+            "Discovery Meeting": "DISC",
+            "New Client List": "NCL",
+        }
+        sel_label = st.selectbox("Select sheet", list(sheets.keys()))
+        key = sheets[sel_label]
+
+        # Choose Year/Month (used for Purge Month)
+        colY, colM = st.columns(2)
+        yr = colY.number_input("Year", min_value=2000, max_value=2100,
+                               value=dt.date.today().year, step=1)
+        mo = colM.number_input("Month", min_value=1, max_value=12,
+                               value=dt.date.today().month, step=1)
+
+        # Helpers
+        def _date_col_for(logical_key: str) -> Optional[str]:
+            if logical_key == "NCL":
+                return "Date we had BOTH the signed CLA and full payment"
+            if logical_key == "INIT":
+                return "Initial Consultation With Pji Law"
+            if logical_key == "DISC":
+                return "Discovery Meeting With Pji Law"
+            # LEADS has no canonical date column; CALLS is special (Month-Year)
+            return None
+
+        def _purge_month(logical_key: str, year: int, month: int) -> tuple[bool, int]:
+            """Remove rows for the given month; returns (ok, removed_count)."""
+            df = _read_ws_by_name(logical_key)
+            if df.empty:
+                return True, 0
+
+            if logical_key == "CALLS":
+                # Filter on Month-Year e.g. "2025-07"
+                mkey = f"{year}-{month:02d}"
+                before = len(df)
+                df2 = df.loc[df["Month-Year"].astype(str).str.strip() != mkey].copy()
+                ok = _write_ws_by_name(logical_key, df2)
+                return ok, before - len(df2)
+
+            date_col = _date_col_for(logical_key)
+            if not date_col or date_col not in df.columns:
+                return False, 0
+
+            s = pd.to_datetime(df[date_col], errors="coerce")
+            mask_drop = (s.dt.year == int(year)) & (s.dt.month == int(month))
+            removed = int(mask_drop.sum())
+            df2 = df.loc[~mask_drop].copy()
+            ok = _write_ws_by_name(logical_key, df2)
+            return ok, removed
+
+        def _wipe_all(logical_key: str) -> bool:
+            return _write_ws_by_name(logical_key, pd.DataFrame())
+
+        def _dedupe_sheet(logical_key: str) -> tuple[bool, int]:
+            """Re-dedupe whole sheet using the same keys used at upload time.
+               Returns (ok, removed_dupes)."""
+            df = _read_ws_by_name(logical_key)
+            if df.empty:
+                return True, 0
+
+            if logical_key == "LEADS":
+                k = (df.get("Email","").astype(str).str.strip() + "|" +
+                     df.get("Matter ID","").astype(str).str.strip() + "|" +
+                     df.get("Stage","").astype(str).str.strip() + "|" +
+                     df.get("Initial Consultation With Pji Law","").astype(str) + "|" +
+                     df.get("Discovery Meeting With Pji Law","").astype(str))
+            elif logical_key == "INIT":
+                k = (df.get("Email","").astype(str).str.strip() + "|" +
+                     df.get("Matter ID","").astype(str).str.strip() + "|" +
+                     df.get("Initial Consultation With Pji Law","").astype(str) + "|" +
+                     df.get("Sub Status","").astype(str).str.strip())
+            elif logical_key == "DISC":
+                k = (df.get("Email","").astype(str).str.strip() + "|" +
+                     df.get("Matter ID","").astype(str).str.strip() + "|" +
+                     df.get("Discovery Meeting With Pji Law","").astype(str) + "|" +
+                     df.get("Sub Status","").astype(str).str.strip())
+            elif logical_key == "NCL":
+                # Accept both flag casings
+                flag_col = "Retained With Consult (Y/N)"
+                if flag_col not in df.columns and "Retained with Consult (Y/N)" in df.columns:
+                    df = df.rename(columns={"Retained with Consult (Y/N)": flag_col})
+                k = (df.get("Client Name","").astype(str).str.strip() + "|" +
+                     df.get("Matter Number/Link","").astype(str).str.strip() + "|" +
+                     df.get("Date we had BOTH the signed CLA and full payment","").astype(str) + "|" +
+                     df.get(flag_col,"").astype(str).str.strip())
+            else:  # CALLS
+                # Master kept clean: use Month-Year + Name + Category
+                k = (df.get("Month-Year","").astype(str).str.strip() + "|" +
+                     df.get("Name","").astype(str).str.strip() + "|" +
+                     df.get("Category","").astype(str).str.strip())
+
+            before = len(df)
+            df2 = df.loc[~k.duplicated(keep="last")].copy()
+            ok = _write_ws_by_name(logical_key, df2)
+            return ok, before - len(df2)
+
+        st.divider()
+        colA, colB, colC = st.columns([1,1,1])
+
+        if colA.button("Purge Month"):
+            ok, removed = _purge_month(key, int(yr), int(mo))
+            if ok:
+                st.success(f"Purged {removed} row(s) for {int(yr)}-{int(mo):02d} in '{sel_label}'.")
+            else:
+                st.warning("Nothing purged (missing date column or unsupported for this sheet).")
+
+        # Wipe ALL rows (with confirmation)
+        confirm_wipe = colB.checkbox("Confirm wipe", value=False, help="This deletes all rows in the selected sheet.")
+        if colB.button("Wipe ALL rows", disabled=not confirm_wipe):
+            ok = _wipe_all(key)
+            st.success(f"All rows wiped in '{sel_label}'.") if ok else st.error("Wipe failed.")
+
+        if colC.button("Re-dedupe sheet"):
+            ok, removed = _dedupe_sheet(key)
+            if ok:
+                st.success(f"Removed {removed} duplicate row(s) in '{sel_label}'.")
+            else:
+                st.error("Re-dedupe failed.")
