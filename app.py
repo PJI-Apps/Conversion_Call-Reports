@@ -5,6 +5,7 @@
 # - Calls persisted; master kept clean (helpers recomputed in-memory)
 # - Upload expander collapsed by default but "sticky-open" after interaction
 # - Conversion results Month/Year filters; uploads are date ranges
+# - Admin sidebar: purge month, wipe all, re-dedupe
 # - Robust charts (no dtype/empty-frame crashes)
 
 import io
@@ -12,9 +13,7 @@ import re
 import json
 import hashlib
 import datetime as dt
-from typing import List, Dict, Tuple
-from typing import Optional
-
+from typing import List, Dict, Tuple, Optional
 
 import pandas as pd
 import streamlit as st
@@ -77,7 +76,6 @@ except Exception as e:
 # Page header
 # ───────────────────────────────────────────────────────────────────────────────
 st.title("📊 Conversion and Call Report")
-st.markdown("### 📞 Zoom Call Reports")
 
 # ───────────────────────────────────────────────────────────────────────────────
 # Google Sheets master (one spreadsheet URL, five worksheets/tabs)
@@ -312,7 +310,7 @@ if "exp_upload_open" not in st.session_state:
     st.session_state["exp_upload_open"] = False
 
 # ───────────────────────────────────────────────────────────────────────────────
-# UI — Calls
+# Data Upload (Calls & Conversion) — collapsed by default
 # ───────────────────────────────────────────────────────────────────────────────
 def upload_section(section_id: str, title: str, expander_flag: str) -> Tuple[str, object]:
     st.subheader(title)
@@ -351,20 +349,20 @@ def upload_section(section_id: str, title: str, expander_flag: str) -> Tuple[str
     st.divider()
     return period_key, uploaded
 
-# ── Reporter gating (commented out per your request; uploader visible to everyone) ──
+# Everyone can access uploaders for now (gating code kept but commented)
 # is_reporter = True
 # try:
 #     allowed = set(st.secrets.get("report_access", {}).get("reporters", []))
 #     is_reporter = (username in allowed) or (name in allowed) if allowed else False
 # except Exception:
 #     is_reporter = False
-is_reporter = True  # <- everyone can access uploaders for now
+is_reporter = True
 
 # Session for dedupe
 if "hashes_calls" not in st.session_state: st.session_state["hashes_calls"] = set()
 if "hashes_conv"  not in st.session_state: st.session_state["hashes_conv"]  = set()
 
-with st.expander("🛠️ Upload data (Calls & Conversion)", expanded=st.session_state.get("exp_upload_open", False)):
+with st.expander("🧾 Data Upload (Calls & Conversion)", expanded=st.session_state.get("exp_upload_open", False)):
     # Calls uploader (single-month range)
     calls_period_key, calls_uploader = upload_section("zoom_calls", "Zoom Calls", "exp_upload_open")
     if calls_uploader:
@@ -403,7 +401,7 @@ with st.expander("🛠️ Upload data (Calls & Conversion)", expanded=st.session
         except Exception as e:
             st.error("Could not parse Calls CSV."); st.exception(e)
 
-    # ───────── Conversion uploaders (date range) ─────────
+    # Conversion uploaders (date range)
     c1, c2 = st.columns(2)
     upload_start = c1.date_input(
         "Conversion upload start date",
@@ -452,12 +450,7 @@ with st.expander("🛠️ Upload data (Calls & Conversion)", expanded=st.session
     up_ncl   = st.file_uploader("Upload **New Client List**", type=["csv","xls","xlsx"],
                                 key="up_ncl", on_change=_keep_open_flag, args=("exp_upload_open",))
 
-    uploads = {
-        "LEADS": up_leads,
-        "INIT":  up_init,
-        "DISC":  up_disc,
-        "NCL":   up_ncl,
-    }
+    uploads = {"LEADS": up_leads, "INIT": up_init, "DISC": up_disc, "NCL": up_ncl}
     for key_name, upl in uploads.items():
         if not upl: continue
         try:
@@ -514,13 +507,16 @@ df_ncl   = _read_ws_by_name("NCL")   if GSHEET is not None else pd.DataFrame()
 
 # Recompute helper seconds for Calls (master kept clean)
 if not df_calls.empty:
-    df_calls["__avg_sec"] = pd.to_timedelta(df_calls["Avg Call Time"], errors="coerce").dt.total_seconds().fillna(0.0)
+    df_calls["__avg_sec"]   = pd.to_timedelta(df_calls["Avg Call Time"], errors="coerce").dt.total_seconds().fillna(0.0)
     df_calls["__total_sec"] = pd.to_timedelta(df_calls["Total Call Time"], errors="coerce").dt.total_seconds().fillna(0.0)
-    df_calls["__hold_sec"] = pd.to_timedelta(df_calls["Total Hold Time"], errors="coerce").dt.total_seconds().fillna(0.0)
+    df_calls["__hold_sec"]  = pd.to_timedelta(df_calls["Total Hold Time"], errors="coerce").dt.total_seconds().fillna(0.0)
 
 # ───────────────────────────────────────────────────────────────────────────────
-# Calls filters + table + charts
+# Zoom Call Reports — Filters, Results, Visualizations
 # ───────────────────────────────────────────────────────────────────────────────
+st.markdown("---")
+st.header("Zoom Call Reports")
+
 st.subheader("Filters — Calls")
 months_map = {"01":"January","02":"February","03":"March","04":"April","05":"May","06":"June",
               "07":"July","08":"August","09":"September","10":"October","11":"November","12":"December"}
@@ -820,15 +816,9 @@ else:
             f"Total retained={row10} ({row11}%)"
         )
 
-# Sidebar note
-with st.sidebar.expander("📦 Master Data (Google Sheets)", expanded=False):
-    if GSHEET is None:
-        st.caption("Not configured. Add `[gcp_service_account]` and `[master_store]` to Secrets.")
-    else:
-        st.success("Connected to Master Store (Google Sheets).")
-        st.caption("Tabs used: " + ", ".join(TAB_NAMES.values()))
-
-# ── Sidebar: Master Data + Admin maintenance tools ──
+# ───────────────────────────────────────────────────────────────────────────────
+# Sidebar: Master Data + Admin maintenance tools
+# ───────────────────────────────────────────────────────────────────────────────
 with st.sidebar.expander("📦 Master Data (Google Sheets) — Admin", expanded=False):
     if GSHEET is None:
         st.caption("Not configured. Add `[gcp_service_account]` and `[master_store]` to Secrets.")
@@ -854,7 +844,6 @@ with st.sidebar.expander("📦 Master Data (Google Sheets) — Admin", expanded=
         mo = colM.number_input("Month", min_value=1, max_value=12,
                                value=dt.date.today().month, step=1)
 
-        # Helpers
         def _date_col_for(logical_key: str) -> Optional[str]:
             if logical_key == "NCL":
                 return "Date we had BOTH the signed CLA and full payment"
@@ -862,8 +851,7 @@ with st.sidebar.expander("📦 Master Data (Google Sheets) — Admin", expanded=
                 return "Initial Consultation With Pji Law"
             if logical_key == "DISC":
                 return "Discovery Meeting With Pji Law"
-            # LEADS has no canonical date column; CALLS is special (Month-Year)
-            return None
+            return None  # LEADS has no canonical date; CALLS uses Month-Year
 
         def _purge_month(logical_key: str, year: int, month: int) -> tuple[bool, int]:
             """Remove rows for the given month; returns (ok, removed_count)."""
@@ -872,7 +860,6 @@ with st.sidebar.expander("📦 Master Data (Google Sheets) — Admin", expanded=
                 return True, 0
 
             if logical_key == "CALLS":
-                # Filter on Month-Year e.g. "2025-07"
                 mkey = f"{year}-{month:02d}"
                 before = len(df)
                 df2 = df.loc[df["Month-Year"].astype(str).str.strip() != mkey].copy()
@@ -894,8 +881,7 @@ with st.sidebar.expander("📦 Master Data (Google Sheets) — Admin", expanded=
             return _write_ws_by_name(logical_key, pd.DataFrame())
 
         def _dedupe_sheet(logical_key: str) -> tuple[bool, int]:
-            """Re-dedupe whole sheet using the same keys used at upload time.
-               Returns (ok, removed_dupes)."""
+            """Re-dedupe whole sheet using the same keys used at upload time."""
             df = _read_ws_by_name(logical_key)
             if df.empty:
                 return True, 0
@@ -917,7 +903,6 @@ with st.sidebar.expander("📦 Master Data (Google Sheets) — Admin", expanded=
                      df.get("Discovery Meeting With Pji Law","").astype(str) + "|" +
                      df.get("Sub Status","").astype(str).str.strip())
             elif logical_key == "NCL":
-                # Accept both flag casings
                 flag_col = "Retained With Consult (Y/N)"
                 if flag_col not in df.columns and "Retained with Consult (Y/N)" in df.columns:
                     df = df.rename(columns={"Retained with Consult (Y/N)": flag_col})
@@ -926,7 +911,6 @@ with st.sidebar.expander("📦 Master Data (Google Sheets) — Admin", expanded=
                      df.get("Date we had BOTH the signed CLA and full payment","").astype(str) + "|" +
                      df.get(flag_col,"").astype(str).str.strip())
             else:  # CALLS
-                # Master kept clean: use Month-Year + Name + Category
                 k = (df.get("Month-Year","").astype(str).str.strip() + "|" +
                      df.get("Name","").astype(str).str.strip() + "|" +
                      df.get("Category","").astype(str).str.strip())
@@ -946,7 +930,6 @@ with st.sidebar.expander("📦 Master Data (Google Sheets) — Admin", expanded=
             else:
                 st.warning("Nothing purged (missing date column or unsupported for this sheet).")
 
-        # Wipe ALL rows (with confirmation)
         confirm_wipe = colB.checkbox("Confirm wipe", value=False, help="This deletes all rows in the selected sheet.")
         if colB.button("Wipe ALL rows", disabled=not confirm_wipe):
             ok = _wipe_all(key)
