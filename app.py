@@ -118,22 +118,78 @@ def _gsheet_client():
 
 GC, GSHEET = _gsheet_client()
 
+# Replace your existing _ws function with this:
+
 def _ws(title: str):
-    if GSHEET is None: return None
-    try:
-        return GSHEET.worksheet(title)
-    except Exception:
-        for fb in TAB_FALLBACKS.get(title, []):
-            try:
-                return GSHEET.worksheet(fb)
-            except Exception:
-                pass
+    """
+    Return a gspread Worksheet for `title`.
+    - Only creates the sheet if it's truly missing.
+    - Handles 429s and 'already exists' races safely.
+    - Tries configured fallbacks before creation.
+    """
+    if GSHEET is None:
+        return None
+
+    import gspread
+    from gspread.exceptions import APIError, WorksheetNotFound
+
+    # Try the exact title first, with a couple of soft retries (helps with 429s).
+    for delay in (0.0, 0.8, 1.6):
         try:
-            GSHEET.add_worksheet(title=title, rows=2000, cols=40)
+            if delay:
+                import time; time.sleep(delay)
             return GSHEET.worksheet(title)
-        except Exception as e:
+        except WorksheetNotFound:
+            break  # it's actually missing → we'll handle below
+        except APIError as e:
+            # For non-404 errors (e.g., 429), try again before giving up
+            last = str(e)
+            if delay == 1.6:
+                # On final failure, fall through to fallback search before considering add
+                pass
+            else:
+                continue
+        except Exception:
+            # Unknown transient error → try again once or fall through
+            if delay == 1.6:
+                pass
+            else:
+                continue
+
+    # Try fallbacks (e.g., a legacy tab name the sheet might already have)
+    for fb in TAB_FALLBACKS.get(title, []):
+        for delay in (0.0, 0.8):
+            try:
+                if delay:
+                    import time; time.sleep(delay)
+                return GSHEET.worksheet(fb)
+            except WorksheetNotFound:
+                break
+            except APIError:
+                continue
+            except Exception:
+                continue
+
+    # As a last resort, create it. If another process created it first,
+    # the add may fail with "already exists" → fetch it again.
+    try:
+        GSHEET.add_worksheet(title=title, rows=2000, cols=40)
+        return GSHEET.worksheet(title)
+    except APIError as e:
+        if "already exists" in str(e):
+            # Race condition: someone else created it. Just return it.
+            try:
+                return GSHEET.worksheet(title)
+            except Exception as e2:
+                st.error(f"Worksheet '{title}' exists but could not be opened: {e2}")
+                return None
+        else:
             st.error(f"Could not access/create worksheet '{title}': {e}")
             return None
+    except Exception as e:
+        st.error(f"Could not access/create worksheet '{title}': {e}")
+        return None
+
 
 @st.cache_data(ttl=120, show_spinner=False)
 def _read_ws_cached(sheet_url: str, tab_title: str, ver: int) -> pd.DataFrame:
