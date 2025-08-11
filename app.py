@@ -20,6 +20,10 @@ import streamlit as st
 import yaml
 import streamlit_authenticator as stauth
 
+# Cache version to bust read cache after writes
+if "gs_ver" not in st.session_state:
+    st.session_state["gs_ver"] = 0
+
 # ───────────────────────────────────────────────────────────────────────────────
 # Auth (version-tolerant)
 # ───────────────────────────────────────────────────────────────────────────────
@@ -95,29 +99,31 @@ TAB_FALLBACKS = {
     "NCL":   ["New_Clients", "New Client List"],
 }
 
+@st.cache_resource(show_spinner=False)
+def _gsheet_client_cached():
+    import gspread
+    from google.oauth2.service_account import Credentials
+    sa = st.secrets.get("gcp_service_account", None)
+    if not sa:
+        raw = st.secrets.get("gcp_service_account_json", None)
+        if raw:
+            sa = json.loads(raw)
+    ms = st.secrets.get("master_store", None)
+    if not sa or not ms or "sheet_url" not in ms:
+        return None, None
+    scopes = ["https://www.googleapis.com/auth/spreadsheets"]
+    creds = Credentials.from_service_account_info(sa, scopes=scopes)
+    gc = gspread.authorize(creds)
+    sh = gc.open_by_url(ms["sheet_url"])
+    return gc, sh
+
 def _gsheet_client():
     try:
-        import gspread
-        from google.oauth2.service_account import Credentials
-        # accept either structured TOML or raw JSON blob
-        sa = st.secrets.get("gcp_service_account", None)
-        if not sa:
-            raw = st.secrets.get("gcp_service_account_json", None)
-            if raw:
-                sa = json.loads(raw)
-        ms = st.secrets.get("master_store", None)
-        if not sa or not ms or "sheet_url" not in ms:
-            return None, None
-        if "client_email" not in sa:
-            raise ValueError("Service account object missing 'client_email'")
-        scopes = ["https://www.googleapis.com/auth/spreadsheets"]  # Sheets-only scope
-        creds = Credentials.from_service_account_info(sa, scopes=scopes)
-        gc = gspread.authorize(creds)
-        sh = gc.open_by_url(ms["sheet_url"])
-        return gc, sh
+        return _gsheet_client_cached()
     except Exception as e:
         st.warning(f"Master store unavailable: {e}")
         return None, None
+
 
 GC, GSHEET = _gsheet_client()
 
@@ -138,35 +144,44 @@ def _ws(title: str):
             st.error(f"Could not access/create worksheet '{title}': {e}")
             return None
 
+@st.cache_data(ttl=120, show_spinner=False)
+def _read_ws_cached(sheet_url: str, tab_title: str, ver: int) -> pd.DataFrame:
+    """Read a worksheet; cache by sheet URL + tab title + version key."""
+    import gspread_dataframe as gd
+    gc, sh = _gsheet_client_cached()
+    ws = sh.worksheet(tab_title)
+    # simple backoff for quota spikes
+    for attempt in (0.0, 1.0, 2.0):
+        try:
+            if attempt:
+                import time; time.sleep(attempt)
+            df = gd.get_as_dataframe(ws, evaluate_formulas=True, dtype=str)
+            break
+        except Exception as e:
+            # Re-raise on last attempt
+            if attempt == 2.0:
+                raise
+    df = df.loc[:, ~df.columns.str.contains("^Unnamed")]
+    for c in df.columns:
+        cl = c.lower()
+        if "date" in cl or "with pji law" in cl:
+            df[c] = pd.to_datetime(df[c], errors="coerce")
+    return df.dropna(how="all").fillna("")
+
 def _read_ws_by_name(logical_key: str) -> pd.DataFrame:
-    if GSHEET is None: return pd.DataFrame()
+    if GSHEET is None:
+        return pd.DataFrame()
     ws = _ws(TAB_NAMES[logical_key])
-    if ws is None: return pd.DataFrame()
+    if ws is None:
+        return pd.DataFrame()
     try:
-        import gspread_dataframe as gd
-        df = gd.get_as_dataframe(ws, evaluate_formulas=True, dtype=str)
-        df = df.loc[:, ~df.columns.str.contains("^Unnamed")]
-        # parse likely date columns
-        for c in df.columns:
-            cl = c.lower()
-            if "date" in cl or "with pji law" in cl:
-                df[c] = pd.to_datetime(df[c], errors="coerce")
-        return df.dropna(how="all").fillna("")
+        # cache key uses sheet URL + tab name + version
+        sheet_url = st.secrets["master_store"]["sheet_url"]
+        return _read_ws_cached(sheet_url, ws.title, st.session_state["gs_ver"])
     except Exception as e:
         st.error(f"Read failed for '{ws.title}': {e}")
         return pd.DataFrame()
 
-def _write_ws_by_name(logical_key: str, df: pd.DataFrame):
-    ws = _ws(TAB_NAMES[logical_key])
-    if ws is None or df is None: return False
-    try:
-        import gspread_dataframe as gd
-        ws.clear()
-        gd.set_with_dataframe(ws, df.reset_index(drop=True), include_index=False, include_column_header=True)
-        return True
-    except Exception as e:
-        st.error(f"Write failed for '{TAB_NAMES[logical_key]}': {e}")
-        return False
 
 # ───────────────────────────────────────────────────────────────────────────────
 # Calls processing
