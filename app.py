@@ -6,6 +6,7 @@ import re
 import json
 import hashlib
 import datetime as dt
+from datetime import date, timedelta
 from calendar import monthrange
 from typing import List, Dict, Tuple, Optional
 
@@ -30,7 +31,7 @@ try:
     )
 
     def _login_compat(authenticator_obj):
-        # Try NEW API (0.4.x+)
+        # New API (0.4.x+)
         try:
             res = authenticator_obj.login(
                 fields={"Form name": "Login", "Username": "Username", "Password": "Password"},
@@ -46,7 +47,7 @@ try:
             pass
         except Exception:
             pass
-        # Fallback OLD API (0.3.2)
+        # Old API (0.3.2)
         try:
             return authenticator_obj.login("Login", "main")
         except TypeError:
@@ -69,7 +70,7 @@ except Exception as e:
 st.title("📊 Conversion and Call Report")
 
 # ───────────────────────────────────────────────────────────────────────────────
-# Small log collector so we can keep the main UI quiet
+# Quiet in-app log
 # ───────────────────────────────────────────────────────────────────────────────
 if "logs" not in st.session_state:
     st.session_state["logs"] = []
@@ -93,7 +94,6 @@ TAB_FALLBACKS = {
     "NCL":   ["New_Clients", "New Client List"],
 }
 
-# cache-buster for reads
 if "gs_ver" not in st.session_state:
     st.session_state["gs_ver"] = 0
 
@@ -127,17 +127,11 @@ def _gsheet_client():
 GC, GSHEET = _gsheet_client()
 
 def _ws(title: str):
-    """
-    Safe worksheet getter/creator:
-    - Only creates when truly missing.
-    - Retries on transient API errors.
-    - Resolves 'already exists' races.
-    """
+    """Safe worksheet getter/creator with fallbacks and race-safe creation."""
     if GSHEET is None:
         return None
     import gspread
     from gspread.exceptions import APIError, WorksheetNotFound
-    # try exact
     for delay in (0.0, 0.8, 1.6):
         try:
             if delay:
@@ -145,59 +139,35 @@ def _ws(title: str):
             return GSHEET.worksheet(title)
         except WorksheetNotFound:
             break
-        except APIError as e:
-            if delay == 1.6:
-                pass
-            else:
-                continue
+        except APIError:
+            continue
         except Exception:
-            if delay == 1.6:
-                pass
-            else:
-                continue
-    # try fallbacks
+            continue
     for fb in TAB_FALLBACKS.get(title, []):
-        for delay in (0.0, 0.8):
-            try:
-                if delay:
-                    import time; time.sleep(delay)
-                return GSHEET.worksheet(fb)
-            except WorksheetNotFound:
-                break
-            except APIError:
-                continue
-            except Exception:
-                continue
-    # create
+        try:
+            return GSHEET.worksheet(fb)
+        except Exception:
+            continue
     try:
         GSHEET.add_worksheet(title=title, rows=2000, cols=40)
         return GSHEET.worksheet(title)
-    except APIError as e:
-        if "already exists" in str(e):
-            try:
-                return GSHEET.worksheet(title)
-            except Exception as e2:
-                st.error(f"Worksheet '{title}' exists but could not be opened: {e2}")
-                return None
-        else:
+    except Exception as e:
+        try:
+            return GSHEET.worksheet(title)
+        except Exception:
             st.error(f"Could not access/create worksheet '{title}': {e}")
             return None
-    except Exception as e:
-        st.error(f"Could not access/create worksheet '{title}': {e}")
-        return None
 
 def _clean_datestr(x):
     if pd.isna(x):
         return x
     s = str(x).strip()
-    # Collapse "at" and strip US TZ abbreviations at the end (EDT, EST, etc.)
-    s = re.sub(r"\s+at\s+", " ", s, flags=re.I)
-    s = re.sub(r"\s+(ET|EDT|EST|CT|CDT|CST|MT|MDT|MST|PT|PDT)$", "", s)
+    s = re.sub(r"\s+at\s+", " ", s, flags=re.I)  # "08/08/2025 at 10:00am EDT" → "08/08/2025 10:00am EDT"
+    s = re.sub(r"\s+(ET|EDT|EST|CT|CDT|CST|MT|MDT|MST|PT|PDT)$", "", s)  # drop trailing TZ abbrev
     return s
 
 @st.cache_data(ttl=300, show_spinner=False)
 def _read_ws_cached(sheet_url: str, tab_title: str, ver: int) -> pd.DataFrame:
-    """Read a worksheet; cached; small backoff to avoid 429s."""
     import gspread_dataframe as gd
     gc, sh = _gsheet_client_cached()
     ws = sh.worksheet(tab_title)
@@ -214,7 +184,6 @@ def _read_ws_cached(sheet_url: str, tab_title: str, ver: int) -> pd.DataFrame:
     if last_exc is not None:
         raise last_exc
     df = df.loc[:, ~df.columns.str.contains("^Unnamed")]
-    # Clean/parse likely date columns
     for c in df.columns:
         cl = c.lower()
         if "date" in cl or "with pji law" in cl:
@@ -366,7 +335,6 @@ def process_calls_csv(raw: pd.DataFrame, period_key: str) -> pd.DataFrame:
     out["Total Call Time"] = _fmt_hms(out["_total_sec"])
     out["Total Hold Time"] = _fmt_hms(out["_hold_sec"])
 
-    # helpers for charts (not saved)
     out["__avg_sec"]   = out["avg_sec_weighted"]
     out["__total_sec"] = out["_total_sec"]
     out["__hold_sec"]  = out["_hold_sec"]
@@ -378,17 +346,13 @@ def process_calls_csv(raw: pd.DataFrame, period_key: str) -> pd.DataFrame:
     return out
 
 # ───────────────────────────────────────────────────────────────────────────────
-# Sticky-open expander helpers
+# Sticky-open expander + date helpers
 # ───────────────────────────────────────────────────────────────────────────────
 def _keep_open_flag(flag_key: str):
     st.session_state[flag_key] = True
-
 if "exp_upload_open" not in st.session_state:
     st.session_state["exp_upload_open"] = False
 
-# ───────────────────────────────────────────────────────────────────────────────
-# Utilities for Conversion period selection
-# ───────────────────────────────────────────────────────────────────────────────
 def _month_bounds(year: int, month: int):
     last_day = monthrange(year, month)[1]
     start = dt.date(year, month, 1)
@@ -399,17 +363,24 @@ def _clamp_to_today(end_date: dt.date) -> dt.date:
     today = dt.date.today()
     return min(end_date, today)
 
-def _week_bucket_range(year: int, month: int, bucket: int):
-    # bucket: 1..4 mapping to 1–7, 8–14, 15–21, 22–end
-    start_month, end_month = _month_bounds(year, month)
-    if bucket == 1:
-        return start_month, min(start_month.replace(day=7), end_month)
-    if bucket == 2:
-        s = start_month.replace(day=8);  e = min(start_month.replace(day=14), end_month);  return s, e
-    if bucket == 3:
-        s = start_month.replace(day=15); e = min(start_month.replace(day=21), end_month); return s, e
-    # bucket 4
-    return start_month.replace(day=22), end_month
+def custom_weeks_for_month(year: int, month: int):
+    """Firm-specific weeks: Week1 = 1st→first Sunday; then Mon–Sun; last week ends month-end."""
+    last_day = monthrange(year, month)[1]
+    start_month = date(year, month, 1)
+    end_month = date(year, month, last_day)
+
+    first_sunday = start_month + timedelta(days=(6 - start_month.weekday()))  # Mon=0..Sun=6
+    w1_end = min(first_sunday, end_month)
+    weeks = [{"label": "Week 1", "start": start_month, "end": w1_end}]
+
+    start = w1_end + timedelta(days=1)  # Monday after first Sunday
+    w = 2
+    while start <= end_month:
+        this_end = min(start + timedelta(days=6), end_month)
+        weeks.append({"label": f"Week {w}", "start": start, "end": this_end})
+        start = this_end + timedelta(days=1)
+        w += 1
+    return weeks
 
 def _mask_by_range_dates(df: pd.DataFrame, date_col: str, start: dt.date, end: dt.date) -> pd.Series:
     if df is None or df.empty or date_col not in df.columns:
@@ -428,75 +399,42 @@ def upload_section(section_id: str, title: str, expander_flag: str) -> Tuple[str
     last_of_month = next_month - dt.timedelta(days=1)
 
     c1, c2 = st.columns(2)
-    start = c1.date_input(
-        "Start date",
-        value=first_of_month,
-        key=f"{section_id}_start",
-        on_change=_keep_open_flag,
-        args=(expander_flag,),
-    )
-    end = c2.date_input(
-        "End date",
-        value=last_of_month,
-        key=f"{section_id}_end",
-        on_change=_keep_open_flag,
-        args=(expander_flag,),
-    )
+    start = c1.date_input("Start date", value=first_of_month,
+                          key=f"{section_id}_start", on_change=_keep_open_flag, args=(expander_flag,))
+    end = c2.date_input("End date", value=last_of_month,
+                        key=f"{section_id}_end", on_change=_keep_open_flag, args=(expander_flag,))
     ok, msg = validate_single_month_range(start, end)
     if not ok:
         st.error(msg); st.stop()
     period_key = month_key_from_range(start, end)
 
-    uploaded = st.file_uploader(
-        f"Upload {title} CSV",
-        type=["csv"],
-        key=f"{section_id}_uploader",
-        on_change=_keep_open_flag,
-        args=(expander_flag,),
-    )
+    uploaded = st.file_uploader(f"Upload {title} CSV", type=["csv"],
+                                key=f"{section_id}_uploader", on_change=_keep_open_flag, args=(expander_flag,))
     st.divider()
     return period_key, uploaded
 
-# Session dedupe guards
 if "hashes_calls" not in st.session_state: st.session_state["hashes_calls"] = set()
 if "hashes_conv"  not in st.session_state: st.session_state["hashes_conv"]  = set()
 
 with st.expander("🧾 Data Upload (Calls & Conversion)", expanded=st.session_state.get("exp_upload_open", False)):
-    # Manual escape hatch
     if st.button("Allow re-upload of the same files this session"):
         st.session_state.get("hashes_calls", set()).clear()
         st.session_state.get("hashes_conv", set()).clear()
         st.caption("Ready — you can re-upload the same files now.")
 
-    # Calls uploader (single-month)
     calls_period_key, calls_uploader = upload_section("zoom_calls", "Zoom Calls", "exp_upload_open")
+    force_replace_calls = st.checkbox("Replace this month in Calls if it already exists", key="force_calls_replace")
 
-    # Replace options for ALL uploads
-    force_replace_calls = st.checkbox(
-        "Replace this month in Calls if it already exists",
-        key="force_calls_replace"
-    )
-
-    # Conversion uploaders (date range)
     c1, c2 = st.columns(2)
-    upload_start = c1.date_input(
-        "Conversion upload start date",
-        value=dt.date.today().replace(day=1),
-        key="conv_upload_start",
-        on_change=_keep_open_flag,
-        args=("exp_upload_open",),
-    )
-    upload_end   = c2.date_input(
-        "Conversion upload end date",
-        value=dt.date.today(),
-        key="conv_upload_end",
-        on_change=_keep_open_flag,
-        args=("exp_upload_open",),
-    )
+    upload_start = c1.date_input("Conversion upload start date",
+                                 value=dt.date.today().replace(day=1),
+                                 key="conv_upload_start", on_change=_keep_open_flag, args=("exp_upload_open",))
+    upload_end   = c2.date_input("Conversion upload end date",
+                                 value=dt.date.today(),
+                                 key="conv_upload_end", on_change=_keep_open_flag, args=("exp_upload_open",))
     if upload_start > upload_end:
         st.error("Upload start must be on or before end.")
 
-    # Uploader widgets + replace flags
     up_leads = st.file_uploader("Upload **Leads_PNCs**", type=["csv","xls","xlsx"],
                                 key="up_leads_pncs", on_change=_keep_open_flag, args=("exp_upload_open",))
     replace_leads = st.checkbox("Replace matching records in Leads (Email+Matter ID+Stage+IC Date+DM Date)", key="rep_leads")
@@ -513,7 +451,6 @@ with st.expander("🧾 Data Upload (Calls & Conversion)", expanded=st.session_st
                                 key="up_ncl", on_change=_keep_open_flag, args=("exp_upload_open",))
     replace_ncl = st.checkbox("Replace this date range in New Client List", key="rep_ncl")
 
-    # Helper: read any (csv/xls/xlsx)
     def _read_any(upload):
         if upload is None: return None
         name = (upload.name or "").lower()
@@ -535,7 +472,6 @@ with st.expander("🧾 Data Upload (Calls & Conversion)", expanded=st.session_st
         df.columns = [str(c).strip() for c in df.columns]
         return df
 
-    # Calls processing
     if calls_uploader:
         CALLS_MASTER_COLS = [
             "Category","Name","Total Calls","Completed Calls","Outgoing","Received",
@@ -569,7 +505,6 @@ with st.expander("🧾 Data Upload (Calls & Conversion)", expanded=st.session_st
                         current = current.loc[current["Month-Year"].astype(str).str.strip() != calls_period_key].copy()
                     combined = (pd.concat([current, processed_clean], ignore_index=True)
                                 if not current.empty else processed_clean.copy())
-                    # Dedupe by Month-Year + Name + Category
                     key = (combined["Month-Year"].astype(str).str.strip() + "|" +
                            combined["Name"].astype(str).str.strip() + "|" +
                            combined["Category"].astype(str).str.strip())
@@ -581,7 +516,6 @@ with st.expander("🧾 Data Upload (Calls & Conversion)", expanded=st.session_st
         except Exception as e:
             st.error("Could not parse Calls CSV."); st.exception(e)
 
-    # Conversion processing (with per-source replace logic)
     uploads = {
         "LEADS": (up_leads, replace_leads),
         "INIT":  (up_init,  replace_init),
@@ -606,16 +540,13 @@ with st.expander("🧾 Data Upload (Calls & Conversion)", expanded=st.session_st
             if df_up is None or df_up.empty:
                 st.caption(f"{key_name}: file appears empty."); continue
 
-            # NCL flag normalize
             if key_name == "NCL" and "Retained with Consult (Y/N)" in df_up.columns and "Retained With Consult (Y/N)" not in df_up.columns:
                 df_up = df_up.rename(columns={"Retained with Consult (Y/N)":"Retained With Consult (Y/N)"})
 
             current = _read_ws_by_name(key_name)
 
-            # Apply replacement strategy
             if want_replace and not current.empty:
                 if key_name == "LEADS":
-                    # Replace matching records: remove any existing keys that appear in the incoming upload
                     key_in = (
                         df_up.get("Email","").astype(str).str.strip() + "|" +
                         df_up.get("Matter ID","").astype(str).str.strip() + "|" +
@@ -651,7 +582,6 @@ with st.expander("🧾 Data Upload (Calls & Conversion)", expanded=st.session_st
 
             combined = pd.concat([current, df_up], ignore_index=True) if not current.empty else df_up.copy()
 
-            # Dedupe keys per dataset
             if key_name == "LEADS":
                 k = (combined.get("Email","").astype(str).str.strip() + "|" +
                      combined.get("Matter ID","").astype(str).str.strip() + "|" +
@@ -681,7 +611,7 @@ with st.expander("🧾 Data Upload (Calls & Conversion)", expanded=st.session_st
         except Exception as e:
             st.error(f"{key_name}: upload failed."); st.exception(e)
 
-# Load masters (after uploads)
+# Load masters
 df_calls = _read_ws_by_name("CALLS") if GSHEET is not None else pd.DataFrame()
 df_leads = _read_ws_by_name("LEADS") if GSHEET is not None else pd.DataFrame()
 df_init  = _read_ws_by_name("INIT")  if GSHEET is not None else pd.DataFrame()
@@ -829,12 +759,11 @@ if not view_calls.empty and plotly_ok:
         st.plotly_chart(fig3, use_container_width=True)
 
 # ───────────────────────────────────────────────────────────────────────────────
-# Conversion Report (with advanced period selector)
+# Conversion Report (now with custom week option)
 # ───────────────────────────────────────────────────────────────────────────────
 st.markdown("---")
 st.header("Conversion Report")
 
-# Period selector (MTD / Full month / YTD / Week of month / Custom)
 cols_top = st.columns([1,1,2])
 period_mode = cols_top[2].radio(
     "Period",
@@ -842,7 +771,6 @@ period_mode = cols_top[2].radio(
     horizontal=True,
 )
 
-# Determine available years from data (fallback to current year)
 def _years_from(*dfs_cols):
     ys = set()
     for df, col in dfs_cols:
@@ -865,11 +793,19 @@ month_nums = list(months_map_names.keys())
 
 cyr, cmo = st.columns(2)
 sel_year_conv = cyr.selectbox("Year", years_conv, index=len(years_conv)-1)
-sel_month_num = cmo.selectbox("Month", month_nums, index=dt.date.today().month-1, format_func=lambda m: months_map_names[m])
+sel_month_num = cmo.selectbox("Month", month_nums, index=dt.date.today().month-1,
+                              format_func=lambda m: months_map_names[m])
 
-bucket = None
+week_defs = None
+sel_week_idx = 0
 if period_mode == "Week of month":
-    bucket = st.selectbox("Week of month", [1,2,3,4], index=0, format_func=lambda b: f"Week {b} ({['1–7','8–14','15–21','22–end'][b-1]})")
+    week_defs = custom_weeks_for_month(sel_year_conv, sel_month_num)
+    def _wk_label(i):
+        wk = week_defs[i]; sd, ed = wk["start"], wk["end"]
+        return f'{wk["label"]} ({sd.day}–{ed.day} {ed.strftime("%b")})'
+    sel_week_idx = st.selectbox("Week of month",
+                                options=list(range(len(week_defs))),
+                                index=0, format_func=_wk_label)
 
 cust_cols = st.columns(2)
 custom_start = custom_end = None
@@ -877,10 +813,8 @@ if period_mode == "Custom range":
     custom_start = cust_cols[0].date_input("Start date", value=dt.date.today().replace(day=1))
     custom_end   = cust_cols[1].date_input("End date",   value=dt.date.today())
     if custom_start > custom_end:
-        st.error("Start date must be on or before End date.")
-        st.stop()
+        st.error("Start date must be on or before End date."); st.stop()
 
-# Resolve to (start_date, end_date)
 if period_mode == "Month to date":
     mstart, mend = _month_bounds(sel_year_conv, sel_month_num)
     if dt.date.today().month == sel_month_num and dt.date.today().year == sel_year_conv:
@@ -894,13 +828,13 @@ elif period_mode == "Year to date":
     y_end   = _clamp_to_today(dt.date(sel_year_conv, 12, 31)) if sel_year_conv == dt.date.today().year else dt.date(sel_year_conv, 12, 31)
     start_date, end_date = y_start, y_end
 elif period_mode == "Week of month":
-    start_date, end_date = _week_bucket_range(sel_year_conv, sel_month_num, bucket or 1)
+    wk = week_defs[sel_week_idx]
+    start_date, end_date = wk["start"], wk["end"]
 else:
     start_date, end_date = custom_start, custom_end
 
 st.caption(f"Showing Conversion metrics for **{start_date:%-d %b %Y} → {end_date:%-d %b %Y}**")
 
-# Apply the date range to each dataset
 init_mask = _mask_by_range_dates(df_init, "Initial Consultation With Pji Law", start_date, end_date)
 disc_mask = _mask_by_range_dates(df_disc, "Discovery Meeting With Pji Law", start_date, end_date)
 ncl_mask  = _mask_by_range_dates(df_ncl,  "Date we had BOTH the signed CLA and full payment", start_date, end_date)
@@ -909,7 +843,7 @@ init_in = df_init.loc[init_mask].copy() if not df_init.empty else pd.DataFrame()
 disc_in = df_disc.loc[disc_mask].copy() if not df_disc.empty else pd.DataFrame()
 ncl_in  = df_ncl.loc[ncl_mask].copy()  if not df_ncl.empty  else pd.DataFrame()
 
-# Row 1 & 2 — by your spec, they use Leads_PNCs counts without a date filter
+# Row 1 & 2 (unchanged logic — still not date-filtered)
 row1 = int(
     df_leads.loc[
         df_leads["Stage"].astype(str).str.strip() != "Marketing/Scam/Spam (Non-Lead)"
@@ -956,8 +890,12 @@ row7  = _pct(row6, row4)
 row9  = _pct(row8, row4)
 row11 = _pct(row10, row2)
 
+# Use full-width hash to avoid markdown-style rendering in static tables
+def _label(s: str) -> str:
+    return s.replace("#", "＃")
+
 kpi_rows = pd.DataFrame({
-    "Metric": [
+    "Metric": list(map(_label, [
         "# of Leads",
         "# of PNCs",
         "PNCs who retained without consultation",
@@ -969,13 +907,13 @@ kpi_rows = pd.DataFrame({
         "% of PNCs who retained after consult",
         "# of Total PNCs who retained",
         "% of total PNCs who retained",
-    ],
+    ])),
     "Value": [
         row1, row2, row3, row4, f"{row5}%", row6, f"{row7}%", row8, f"{row9}%", row10, f"{row11}%"
     ],
 })
-kpi_rows["Value"] = kpi_rows["Value"].astype(str)  # ensure no Arrow dtype issues
-st.table(kpi_rows)  # non-sortable display
+kpi_rows["Value"] = kpi_rows["Value"].astype(str)
+st.table(kpi_rows)  # static, non-sortable
 
 with st.expander("Debug details (for reconciliation)", expanded=False):
     if not df_leads.empty and "Stage" in df_leads.columns:
@@ -983,186 +921,4 @@ with st.expander("Debug details (for reconciliation)", expanded=False):
     if not init_in.empty and "Sub Status" in init_in.columns:
         st.write("Initial_Consultation — Sub Status (in range)", init_in["Sub Status"].value_counts(dropna=False))
     if not disc_in.empty and "Sub Status" in disc_in.columns:
-        st.write("Discovery_Meeting — Sub Status (in range)",   disc_in["Sub Status"].value_counts(dropna=False))
-    if ncl_flag_col:
-        st.write("New Client List — Retained split (in range)", ncl_in[ncl_flag_col].value_counts(dropna=False))
-    st.write(
-        f"Computed: Leads={row1}, PNCs={row2}, "
-        f"Retained w/out consult={row3}, Scheduled={row4} ({row5}%), "
-        f"Showed={row6} ({row7}%), Retained after consult={row8} ({row9}%), "
-        f"Total retained={row10} ({row11}%)"
-    )
-
-# ───────────────────────────────────────────────────────────────────────────────
-# Sidebar: Master Data — Admin (stacked layout)
-# ───────────────────────────────────────────────────────────────────────────────
-with st.sidebar.expander("📦 Master Data (Google Sheets) — Admin", expanded=False):
-    if GSHEET is None:
-        st.caption("Not configured. Add `[gcp_service_account]` and `[master_store]` to Secrets.")
-    else:
-        st.success("Connected to Master Store (Google Sheets).")
-        st.caption("Tabs used: " + ", ".join(TAB_NAMES.values()))
-
-        if st.button("🔄 Refresh data now", use_container_width=True):
-            st.session_state["gs_ver"] += 1
-            st.rerun()
-
-        # Master reset — clears session guards & all caches (clean slate)
-        if st.button("🧹 Master Reset (session & caches)", use_container_width=True):
-            for k in ["hashes_calls","hashes_conv","exp_upload_open","logs"]:
-                st.session_state.pop(k, None)
-            try:
-                st.cache_data.clear()
-            except Exception:
-                pass
-            try:
-                st.cache_resource.clear()
-            except Exception:
-                pass
-            st.success("Reset complete. Reloading…")
-            st.rerun()
-
-        sheets = {
-            "Calls": "CALLS",
-            "Leads/PNCs": "LEADS",
-            "Initial Consultation": "INIT",
-            "Discovery Meeting": "DISC",
-            "New Client List": "NCL",
-        }
-        sel_label = st.selectbox("Select sheet", list(sheets.keys()))
-        key = sheets[sel_label]
-
-        colY, colM = st.columns(2)
-        yr = colY.number_input("Year", min_value=2000, max_value=2100,
-                               value=dt.date.today().year, step=1)
-        mo = colM.number_input("Month", min_value=1, max_value=12,
-                               value=dt.date.today().month, step=1)
-
-        def _date_col_for(logical_key: str) -> Optional[str]:
-            if logical_key == "NCL":
-                return "Date we had BOTH the signed CLA and full payment"
-            if logical_key == "INIT":
-                return "Initial Consultation With Pji Law"
-            if logical_key == "DISC":
-                return "Discovery Meeting With Pji Law"
-            return None  # LEADS has no canonical date; CALLS uses Month-Year
-
-        def _purge_month(logical_key: str, year: int, month: int) -> tuple[bool, int]:
-            df = _read_ws_by_name(logical_key)
-            if df.empty:
-                return True, 0
-
-            if logical_key == "CALLS":
-                mkey = f"{year}-{month:02d}"
-                before = len(df)
-                df2 = df.loc[df["Month-Year"].astype(str).str.strip() != mkey].copy()
-                ok = _write_ws_by_name(logical_key, df2)
-                return ok, before - len(df2)
-
-            date_col = _date_col_for(logical_key)
-            if not date_col or date_col not in df.columns:
-                return False, 0
-
-            s = pd.to_datetime(df[date_col], errors="coerce")
-            mask_drop = (s.dt.year == int(year)) & (s.dt.month == int(month))
-            removed = int(mask_drop.sum())
-            df2 = df.loc[~mask_drop].copy()
-            ok = _write_ws_by_name(logical_key, df2)
-            return ok, removed
-
-        def _wipe_all(logical_key: str) -> bool:
-            return _write_ws_by_name(logical_key, pd.DataFrame())
-
-        def _dedupe_sheet(logical_key: str) -> tuple[bool, int]:
-            df = _read_ws_by_name(logical_key)
-            if df.empty:
-                return True, 0
-
-            if logical_key == "LEADS":
-                k = (df.get("Email","").astype(str).str.strip() + "|" +
-                     df.get("Matter ID","").astype(str).str.strip() + "|" +
-                     df.get("Stage","").astype(str).str.strip() + "|" +
-                     df.get("Initial Consultation With Pji Law","").astype(str) + "|" +
-                     df.get("Discovery Meeting With Pji Law","").astype(str))
-            elif logical_key == "INIT":
-                k = (df.get("Email","").astype(str).str.strip() + "|" +
-                     df.get("Matter ID","").astype(str).str.strip() + "|" +
-                     df.get("Initial Consultation With Pji Law","").astype(str) + "|" +
-                     df.get("Sub Status","").astype(str).str.strip())
-            elif logical_key == "DISC":
-                k = (df.get("Email","").astype(str).str.strip() + "|" +
-                     df.get("Matter ID","").astype(str).str.strip() + "|" +
-                     df.get("Discovery Meeting With Pji Law","").astype(str) + "|" +
-                     df.get("Sub Status","").astype(str).str.strip())
-            elif logical_key == "NCL":
-                flag_col = "Retained With Consult (Y/N)"
-                if flag_col not in df.columns and "Retained with Consult (Y/N)" in df.columns:
-                    df = df.rename(columns={"Retained with Consult (Y/N)": flag_col})
-                k = (df.get("Client Name","").astype(str).str.strip() + "|" +
-                     df.get("Matter Number/Link","").astype(str).str.strip() + "|" +
-                     df.get("Date we had BOTH the signed CLA and full payment","").astype(str) + "|" +
-                     df.get(flag_col,"").astype(str).str.strip())
-            else:  # CALLS
-                k = (df.get("Month-Year","").astype(str).str.strip() + "|" +
-                     df.get("Name","").astype(str).str.strip() + "|" +
-                     df.get("Category","").astype(str).str.strip())
-
-            before = len(df)
-            df2 = df.loc[~k.duplicated(keep="last")].copy()
-            ok = _write_ws_by_name(logical_key, df2)
-            return ok, before - len(df2)
-
-        st.divider()
-        st.subheader("Maintenance")
-        st.caption("Safely manage master data. Actions are immediate.")
-
-        with st.container(border=True):
-            st.markdown("**Purge a month**")
-            st.caption("Remove all rows for the selected sheet and month (above).")
-            if st.button("Purge Month", use_container_width=True):
-                ok, removed = _purge_month(key, int(yr), int(mo))
-                if ok:
-                    st.success(f"Purged {removed} row(s) for {int(yr)}-{int(mo):02d} in '{sel_label}'.")
-                    if key == "CALLS":
-                        st.session_state.get("hashes_calls", set()).clear()
-                    else:
-                        st.session_state.get("hashes_conv", set()).clear()
-                    st.session_state["gs_ver"] += 1
-                    st.rerun()
-                else:
-                    st.warning("Nothing purged (missing date column or unsupported for this sheet).")
-
-        with st.container(border=True):
-            st.markdown("**Re-dedupe sheet**")
-            st.caption("Rebuilds unique rows using the same keys as the uploader.")
-            if st.button("Re-dedupe sheet", use_container_width=True):
-                ok, removed = _dedupe_sheet(key)
-                st.success(f"Removed {removed} duplicate row(s).") if ok else st.error("Re-dedupe failed.")
-                if ok:
-                    st.session_state["gs_ver"] += 1
-                    st.rerun()
-
-        with st.container(border=True):
-            st.markdown("**Wipe ALL rows**")
-            st.caption("Deletes every row in the selected sheet. Use with care.")
-            confirm_wipe = st.checkbox("I understand this cannot be undone.", key="confirm_wipe")
-            if st.button("Wipe ALL rows", disabled=not confirm_wipe, use_container_width=True):
-                ok = _wipe_all(key)
-                st.success(f"All rows wiped in '{sel_label}'.") if ok else st.error("Wipe failed.")
-                if ok:
-                    if key == "CALLS":
-                        st.session_state.get("hashes_calls", set()).clear()
-                    else:
-                        st.session_state.get("hashes_conv", set()).clear()
-                    st.session_state["gs_ver"] += 1
-                    st.rerun()
-
-# ───────────────────────────────────────────────────────────────────────────────
-# Quiet technical logs (optional)
-# ───────────────────────────────────────────────────────────────────────────────
-with st.expander("ℹ️ Logs (tech details)", expanded=False):
-    if st.session_state["logs"]:
-        for line in st.session_state["logs"]:
-            st.code(line)
-    else:
-        st.caption("No technical logs this session.")
+        st
