@@ -1,12 +1,5 @@
 # app.py
 # PJI Law • Conversion and Call Report (Streamlit)
-# - Auth (version-tolerant)
-# - Google Sheets master (5 worksheets)
-# - Calls persisted; master kept clean (helpers recomputed in-memory)
-# - Upload expander collapsed by default but "sticky-open" after interaction
-# - Conversion results Month/Year filters; uploads are date ranges
-# - Admin sidebar: purge month, wipe all, re-dedupe, refresh cache
-# - Cached GSheet client + cached reads with backoff to avoid 429 quota
 
 import io
 import re
@@ -72,14 +65,10 @@ except Exception as e:
     st.error("Authentication is not configured correctly. Check your **Secrets**.")
     st.exception(e); st.stop()
 
-# ───────────────────────────────────────────────────────────────────────────────
-# Page header
-# ───────────────────────────────────────────────────────────────────────────────
 st.title("📊 Conversion and Call Report")
 
 # ───────────────────────────────────────────────────────────────────────────────
-# Google Sheets master (one spreadsheet URL, five worksheets/tabs)
-# + Caching to avoid quota spikes
+# Google Sheets master + caching
 # ───────────────────────────────────────────────────────────────────────────────
 TAB_NAMES = {
     "CALLS": "Call_Report_Master",
@@ -96,7 +85,7 @@ TAB_FALLBACKS = {
     "NCL":   ["New_Clients", "New Client List"],
 }
 
-# Cache version used to bust the read cache after any write or manual refresh
+# cache-buster for reads
 if "gs_ver" not in st.session_state:
     st.session_state["gs_ver"] = 0
 
@@ -104,7 +93,6 @@ if "gs_ver" not in st.session_state:
 def _gsheet_client_cached():
     import gspread
     from google.oauth2.service_account import Credentials
-    # accept either structured TOML or raw JSON blob
     sa = st.secrets.get("gcp_service_account", None)
     if not sa:
         raw = st.secrets.get("gcp_service_account_json", None)
@@ -149,13 +137,13 @@ def _ws(title: str):
 
 @st.cache_data(ttl=120, show_spinner=False)
 def _read_ws_cached(sheet_url: str, tab_title: str, ver: int) -> pd.DataFrame:
-    """Read a worksheet; cache by sheet URL + tab title + version key, with basic backoff."""
+    """Read a worksheet; cached; small backoff to avoid 429s."""
     import gspread_dataframe as gd
     gc, sh = _gsheet_client_cached()
     ws = sh.worksheet(tab_title)
 
     last_exc = None
-    for delay in (0.0, 1.0, 2.0):  # tiny backoff to ride out per-minute quota spikes
+    for delay in (0.0, 1.0, 2.0):
         try:
             if delay:
                 import time; time.sleep(delay)
@@ -192,7 +180,7 @@ def _write_ws_by_name(logical_key: str, df: pd.DataFrame):
         import gspread_dataframe as gd
         ws.clear()
         gd.set_with_dataframe(ws, df.reset_index(drop=True), include_index=False, include_column_header=True)
-        # Bust cache version so subsequent reads bypass the 2-minute cache
+        # bust cache after write
         st.session_state["gs_ver"] += 1
         return True
     except Exception as e:
@@ -320,7 +308,7 @@ def process_calls_csv(raw: pd.DataFrame, period_key: str) -> pd.DataFrame:
     out["Total Call Time"] = _fmt_hms(out["_total_sec"])
     out["Total Hold Time"] = _fmt_hms(out["_hold_sec"])
 
-    # Keep helpers for charts (not saved to master)
+    # helpers for charts (not saved)
     out["__avg_sec"]   = out["avg_sec_weighted"]
     out["__total_sec"] = out["_total_sec"]
     out["__hold_sec"]  = out["_hold_sec"]
@@ -341,7 +329,7 @@ if "exp_upload_open" not in st.session_state:
     st.session_state["exp_upload_open"] = False
 
 # ───────────────────────────────────────────────────────────────────────────────
-# Data Upload (Calls & Conversion) — collapsed by default
+# Data Upload (Calls & Conversion)
 # ───────────────────────────────────────────────────────────────────────────────
 def upload_section(section_id: str, title: str, expander_flag: str) -> Tuple[str, object]:
     st.subheader(title)
@@ -383,23 +371,38 @@ def upload_section(section_id: str, title: str, expander_flag: str) -> Tuple[str
 # Everyone can access uploaders for now
 is_reporter = True
 
-# Session for dedupe
+# Session dedupe guards
 if "hashes_calls" not in st.session_state: st.session_state["hashes_calls"] = set()
 if "hashes_conv"  not in st.session_state: st.session_state["hashes_conv"]  = set()
 
 with st.expander("🧾 Data Upload (Calls & Conversion)", expanded=st.session_state.get("exp_upload_open", False)):
-    # Calls uploader (single-month range)
+    # manual escape hatch
+    if st.button("Allow re-upload of the same files this session"):
+        st.session_state.get("hashes_calls", set()).clear()
+        st.session_state.get("hashes_conv", set()).clear()
+        st.success("Duplicate-file guard reset. You can re-upload the same files now.")
+
+    # Calls uploader (single-month)
     calls_period_key, calls_uploader = upload_section("zoom_calls", "Zoom Calls", "exp_upload_open")
     if calls_uploader:
         try:
             fhash = file_md5(calls_uploader)
-            if fhash in st.session_state["hashes_calls"]:
-                st.warning("Calls: duplicate file — ignored.")
+
+            # Smart duplicate guard: only block if same file AND month exists already
+            month_exists = False
+            try:
+                existing = _read_ws_by_name("CALLS")
+                if isinstance(existing, pd.DataFrame) and not existing.empty:
+                    month_exists = existing["Month-Year"].astype(str).eq(calls_period_key).any()
+            except Exception:
+                pass
+
+            if fhash in st.session_state["hashes_calls"] and month_exists:
+                st.warning("Calls: same file and month already present — upload skipped.")
             else:
                 raw = pd.read_csv(calls_uploader)
                 processed = process_calls_csv(raw, calls_period_key)
 
-                # Keep master sheet clean (drop helper columns)
                 CALLS_MASTER_COLS = [
                     "Category","Name","Total Calls","Completed Calls","Outgoing","Received",
                     "Forwarded to Voicemail","Answered by Other","Missed",
@@ -486,7 +489,6 @@ with st.expander("🧾 Data Upload (Calls & Conversion)", expanded=st.session_st
             if df_up is None or df_up.empty:
                 st.warning(f"{key_name}: file appears empty."); continue
 
-            # Normalize NCL retained flag variant
             if key_name == "NCL" and "Retained with Consult (Y/N)" in df_up.columns and "Retained With Consult (Y/N)" not in df_up.columns:
                 df_up = df_up.rename(columns={"Retained with Consult (Y/N)":"Retained With Consult (Y/N)"})
 
@@ -523,21 +525,20 @@ with st.expander("🧾 Data Upload (Calls & Conversion)", expanded=st.session_st
         except Exception as e:
             st.error(f"{key_name}: upload failed."); st.exception(e)
 
-# Load masters (or empty if not configured)
+# Load masters
 df_calls = _read_ws_by_name("CALLS") if GSHEET is not None else locals().get("df_calls_master", pd.DataFrame())
 df_leads = _read_ws_by_name("LEADS") if GSHEET is not None else pd.DataFrame()
 df_init  = _read_ws_by_name("INIT")  if GSHEET is not None else pd.DataFrame()
 df_disc  = _read_ws_by_name("DISC")  if GSHEET is not None else pd.DataFrame()
 df_ncl   = _read_ws_by_name("NCL")   if GSHEET is not None else pd.DataFrame()
 
-# Recompute helper seconds for Calls (master kept clean)
 if not df_calls.empty:
     df_calls["__avg_sec"]   = pd.to_timedelta(df_calls["Avg Call Time"], errors="coerce").dt.total_seconds().fillna(0.0)
     df_calls["__total_sec"] = pd.to_timedelta(df_calls["Total Call Time"], errors="coerce").dt.total_seconds().fillna(0.0)
     df_calls["__hold_sec"]  = pd.to_timedelta(df_calls["Total Hold Time"], errors="coerce").dt.total_seconds().fillna(0.0)
 
 # ───────────────────────────────────────────────────────────────────────────────
-# Zoom Call Reports — Filters, Results, Visualizations
+# Zoom Call Reports
 # ───────────────────────────────────────────────────────────────────────────────
 st.markdown("---")
 st.header("Zoom Call Reports")
@@ -624,7 +625,6 @@ except Exception:
     st.info("Charts unavailable (install `plotly>=5.22` in requirements.txt).")
 
 if not view_calls.empty and plotly_ok:
-    # Trend
     vol = (view_calls.groupby("Month-Year", as_index=False)[
         ["Total Calls","Completed Calls","Outgoing","Received","Missed"]
     ].sum())
@@ -639,7 +639,6 @@ if not view_calls.empty and plotly_ok:
         fig1.update_layout(xaxis=dict(tickformat="%b %Y"))
         st.plotly_chart(fig1, use_container_width=True)
 
-    # Completion rate (robust)
     comp = view_calls.groupby("Name", as_index=False)[["Completed Calls", "Total Calls"]].sum()
     if comp.empty or not {"Completed Calls","Total Calls"} <= set(comp.columns):
         with st.expander("✅ Completion rate by staff", expanded=False):
@@ -655,7 +654,6 @@ if not view_calls.empty and plotly_ok:
             fig2.update_layout(xaxis={'categoryorder':'array','categoryarray':comp["Name"].tolist()})
             st.plotly_chart(fig2, use_container_width=True)
 
-    # Avg duration (robust; no groupby apply arithmetic)
     tmp = view_calls.copy()
     tmp["__avg_sec"]   = pd.to_numeric(tmp.get("__avg_sec", 0), errors="coerce").fillna(0.0)
     tmp["Total Calls"] = pd.to_numeric(tmp.get("Total Calls", 0), errors="coerce").fillna(0.0)
@@ -675,7 +673,7 @@ if not view_calls.empty and plotly_ok:
         st.plotly_chart(fig3, use_container_width=True)
 
 # ───────────────────────────────────────────────────────────────────────────────
-# Conversion Report (Month/Year result filters)
+# Conversion Report
 # ───────────────────────────────────────────────────────────────────────────────
 st.markdown("---")
 st.header("Conversion Report")
@@ -741,18 +739,15 @@ if not _soft_has(df_ncl, "Date we had BOTH the signed CLA and full payment"):
 if missing_msgs:
     st.info("Some datasets are missing columns: " + "; ".join(missing_msgs))
 
-# Guard empty frames
 if any(df is None or df.empty for df in [df_leads, df_init, df_disc, df_ncl]):
     st.info("One or more Conversion masters are empty. Upload data in the uploader above.")
     st.dataframe(pd.DataFrame({"Metric": [], "Value": []}), hide_index=True, use_container_width=True)
 else:
-    # Row 1 — # of Leads (exclude Non-Lead)
     row1 = int(
         df_leads.loc[
             df_leads["Stage"].astype(str).str.strip() != "Marketing/Scam/Spam (Non-Lead)"
         ].shape[0]
     )
-    # Row 2 — # of PNCs (exclude the specified set)
     EXCLUDED_PNC_STAGES = {
         "Marketing/Scam/Spam (Non-Lead)","Referred Out","No Stage","New Lead",
         "No Follow Up (No Marketing/Communication)","No Follow Up (Receives Marketing/Communication)",
@@ -766,7 +761,6 @@ else:
         ].shape[0]
     )
 
-    # In-range subsets by Month/Year filters
     init_mask = _conv_mask_by_month(df_init, "Initial Consultation With Pji Law")
     disc_mask = _conv_mask_by_month(df_disc, "Discovery Meeting With Pji Law")
     ncl_mask  = _conv_mask_by_month(df_ncl,  "Date we had BOTH the signed CLA and full payment")
@@ -775,7 +769,6 @@ else:
     disc_in = df_disc.loc[disc_mask].copy()
     ncl_in  = df_ncl.loc[ncl_mask].copy()
 
-    # Row 3 and 8 — NCL retained split
     ncl_flag_col = None
     for candidate in ["Retained With Consult (Y/N)", "Retained with Consult (Y/N)"]:
         if candidate in df_ncl.columns:
@@ -788,13 +781,8 @@ else:
         row3 = 0
         row8 = int(ncl_in.shape[0])
 
-    # Row 10 — total retained
     row10 = int(ncl_in.shape[0])
-
-    # Row 4 — scheduled consults = Init + Discovery
     row4 = int(init_in.shape[0] + disc_in.shape[0])
-
-    # Row 6 — showed up for consultation (Sub Status == "Pnc")
     row6 = int(
         (init_in["Sub Status"].astype(str).str.strip() == "Pnc").sum()
         + (disc_in["Sub Status"].astype(str).str.strip() == "Pnc").sum()
@@ -802,10 +790,10 @@ else:
 
     def _pct(numer, denom): return 0 if (denom is None or denom == 0) else round((numer/denom)*100)
 
-    row5  = _pct(row4, (row2 - row3))  # % remaining PNCs who scheduled consult
-    row7  = _pct(row6, row4)           # % scheduled who showed
-    row9  = _pct(row8, row4)           # % retained after consult
-    row11 = _pct(row10, row2)          # % total retained of PNCs
+    row5  = _pct(row4, (row2 - row3))
+    row7  = _pct(row6, row4)
+    row9  = _pct(row8, row4)
+    row11 = _pct(row10, row2)
 
     kpi_rows = pd.DataFrame({
         "Metric": [
@@ -841,7 +829,7 @@ else:
         )
 
 # ───────────────────────────────────────────────────────────────────────────────
-# Sidebar: Master Data + Admin maintenance tools (+ Refresh)
+# Sidebar: Master Data — Admin (stacked layout)
 # ───────────────────────────────────────────────────────────────────────────────
 with st.sidebar.expander("📦 Master Data (Google Sheets) — Admin", expanded=False):
     if GSHEET is None:
@@ -849,11 +837,11 @@ with st.sidebar.expander("📦 Master Data (Google Sheets) — Admin", expanded=
     else:
         st.success("Connected to Master Store (Google Sheets).")
         st.caption("Tabs used: " + ", ".join(TAB_NAMES.values()))
-        if st.button("🔄 Refresh data now"):
+
+        if st.button("🔄 Refresh data now", use_container_width=True):
             st.session_state["gs_ver"] += 1
             st.experimental_rerun()
 
-        # Sheet selector
         sheets = {
             "Calls": "CALLS",
             "Leads/PNCs": "LEADS",
@@ -864,7 +852,6 @@ with st.sidebar.expander("📦 Master Data (Google Sheets) — Admin", expanded=
         sel_label = st.selectbox("Select sheet", list(sheets.keys()))
         key = sheets[sel_label]
 
-        # Choose Year/Month (used for Purge Month)
         colY, colM = st.columns(2)
         yr = colY.number_input("Year", min_value=2000, max_value=2100,
                                value=dt.date.today().year, step=1)
@@ -881,7 +868,6 @@ with st.sidebar.expander("📦 Master Data (Google Sheets) — Admin", expanded=
             return None  # LEADS has no canonical date; CALLS uses Month-Year
 
         def _purge_month(logical_key: str, year: int, month: int) -> tuple[bool, int]:
-            """Remove rows for the given month; returns (ok, removed_count)."""
             df = _read_ws_by_name(logical_key)
             if df.empty:
                 return True, 0
@@ -908,7 +894,6 @@ with st.sidebar.expander("📦 Master Data (Google Sheets) — Admin", expanded=
             return _write_ws_by_name(logical_key, pd.DataFrame())
 
         def _dedupe_sheet(logical_key: str) -> tuple[bool, int]:
-            """Re-dedupe whole sheet using the same keys used at upload time."""
             df = _read_ws_by_name(logical_key)
             if df.empty:
                 return True, 0
@@ -948,23 +933,47 @@ with st.sidebar.expander("📦 Master Data (Google Sheets) — Admin", expanded=
             return ok, before - len(df2)
 
         st.divider()
-        colA, colB, colC = st.columns([1,1,1])
+        st.subheader("Maintenance")
+        st.caption("Safely manage master data. Actions are immediate.")
 
-        if colA.button("Purge Month"):
-            ok, removed = _purge_month(key, int(yr), int(mo))
-            if ok:
-                st.success(f"Purged {removed} row(s) for {int(yr)}-{int(mo):02d} in '{sel_label}'.")
-            else:
-                st.warning("Nothing purged (missing date column or unsupported for this sheet).")
+        with st.container(border=True):
+            st.markdown("**Purge a month**")
+            st.caption("Remove all rows for the selected sheet and month (above).")
+            if st.button("Purge Month", use_container_width=True):
+                ok, removed = _purge_month(key, int(yr), int(mo))
+                if ok:
+                    st.success(f"Purged {removed} row(s) for {int(yr)}-{int(mo):02d} in '{sel_label}'.")
+                    # auto-clear duplicate guards and refresh cache
+                    if key == "CALLS":
+                        st.session_state.get("hashes_calls", set()).clear()
+                    else:
+                        st.session_state.get("hashes_conv", set()).clear()
+                    st.session_state["gs_ver"] += 1
+                    st.experimental_rerun()
+                else:
+                    st.warning("Nothing purged (missing date column or unsupported for this sheet).")
 
-        confirm_wipe = colB.checkbox("Confirm wipe", value=False, help="This deletes all rows in the selected sheet.")
-        if colB.button("Wipe ALL rows", disabled=not confirm_wipe):
-            ok = _wipe_all(key)
-            st.success(f"All rows wiped in '{sel_label}'.") if ok else st.error("Wipe failed.")
+        with st.container(border=True):
+            st.markdown("**Re-dedupe sheet**")
+            st.caption("Rebuilds unique rows using the same keys as the uploader.")
+            if st.button("Re-dedupe sheet", use_container_width=True):
+                ok, removed = _dedupe_sheet(key)
+                st.success(f"Removed {removed} duplicate row(s).") if ok else st.error("Re-dedupe failed.")
+                if ok:
+                    st.session_state["gs_ver"] += 1
+                    st.experimental_rerun()
 
-        if colC.button("Re-dedupe sheet"):
-            ok, removed = _dedupe_sheet(key)
-            if ok:
-                st.success(f"Removed {removed} duplicate row(s) in '{sel_label}'.")
-            else:
-                st.error("Re-dedupe failed.")
+        with st.container(border=True):
+            st.markdown("**Wipe ALL rows**")
+            st.caption("Deletes every row in the selected sheet. Use with care.")
+            confirm_wipe = st.checkbox("I understand this cannot be undone.", key="confirm_wipe")
+            if st.button("Wipe ALL rows", disabled=not confirm_wipe, use_container_width=True):
+                ok = _wipe_all(key)
+                st.success(f"All rows wiped in '{sel_label}'.") if ok else st.error("Wipe failed.")
+                if ok:
+                    if key == "CALLS":
+                        st.session_state.get("hashes_calls", set()).clear()
+                    else:
+                        st.session_state.get("hashes_conv", set()).clear()
+                    st.session_state["gs_ver"] += 1
+                    st.experimental_rerun()
