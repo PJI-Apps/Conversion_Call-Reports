@@ -5,8 +5,8 @@
 # - Calls persisted; master kept clean (helpers recomputed in-memory)
 # - Upload expander collapsed by default but "sticky-open" after interaction
 # - Conversion results Month/Year filters; uploads are date ranges
-# - Admin sidebar: purge month, wipe all, re-dedupe
-# - Robust charts (no dtype/empty-frame crashes)
+# - Admin sidebar: purge month, wipe all, re-dedupe, refresh cache
+# - Cached GSheet client + cached reads with backoff to avoid 429 quota
 
 import io
 import re
@@ -19,10 +19,6 @@ import pandas as pd
 import streamlit as st
 import yaml
 import streamlit_authenticator as stauth
-
-# Cache version to bust read cache after writes
-if "gs_ver" not in st.session_state:
-    st.session_state["gs_ver"] = 0
 
 # ───────────────────────────────────────────────────────────────────────────────
 # Auth (version-tolerant)
@@ -83,6 +79,7 @@ st.title("📊 Conversion and Call Report")
 
 # ───────────────────────────────────────────────────────────────────────────────
 # Google Sheets master (one spreadsheet URL, five worksheets/tabs)
+# + Caching to avoid quota spikes
 # ───────────────────────────────────────────────────────────────────────────────
 TAB_NAMES = {
     "CALLS": "Call_Report_Master",
@@ -99,10 +96,15 @@ TAB_FALLBACKS = {
     "NCL":   ["New_Clients", "New Client List"],
 }
 
+# Cache version used to bust the read cache after any write or manual refresh
+if "gs_ver" not in st.session_state:
+    st.session_state["gs_ver"] = 0
+
 @st.cache_resource(show_spinner=False)
 def _gsheet_client_cached():
     import gspread
     from google.oauth2.service_account import Credentials
+    # accept either structured TOML or raw JSON blob
     sa = st.secrets.get("gcp_service_account", None)
     if not sa:
         raw = st.secrets.get("gcp_service_account_json", None)
@@ -111,6 +113,8 @@ def _gsheet_client_cached():
     ms = st.secrets.get("master_store", None)
     if not sa or not ms or "sheet_url" not in ms:
         return None, None
+    if "client_email" not in sa:
+        raise ValueError("Service account object missing 'client_email'")
     scopes = ["https://www.googleapis.com/auth/spreadsheets"]
     creds = Credentials.from_service_account_info(sa, scopes=scopes)
     gc = gspread.authorize(creds)
@@ -123,7 +127,6 @@ def _gsheet_client():
     except Exception as e:
         st.warning(f"Master store unavailable: {e}")
         return None, None
-
 
 GC, GSHEET = _gsheet_client()
 
@@ -146,21 +149,24 @@ def _ws(title: str):
 
 @st.cache_data(ttl=120, show_spinner=False)
 def _read_ws_cached(sheet_url: str, tab_title: str, ver: int) -> pd.DataFrame:
-    """Read a worksheet; cache by sheet URL + tab title + version key."""
+    """Read a worksheet; cache by sheet URL + tab title + version key, with basic backoff."""
     import gspread_dataframe as gd
     gc, sh = _gsheet_client_cached()
     ws = sh.worksheet(tab_title)
-    # simple backoff for quota spikes
-    for attempt in (0.0, 1.0, 2.0):
+
+    last_exc = None
+    for delay in (0.0, 1.0, 2.0):  # tiny backoff to ride out per-minute quota spikes
         try:
-            if attempt:
-                import time; time.sleep(attempt)
+            if delay:
+                import time; time.sleep(delay)
             df = gd.get_as_dataframe(ws, evaluate_formulas=True, dtype=str)
+            last_exc = None
             break
         except Exception as e:
-            # Re-raise on last attempt
-            if attempt == 2.0:
-                raise
+            last_exc = e
+    if last_exc is not None:
+        raise last_exc
+
     df = df.loc[:, ~df.columns.str.contains("^Unnamed")]
     for c in df.columns:
         cl = c.lower()
@@ -169,19 +175,29 @@ def _read_ws_cached(sheet_url: str, tab_title: str, ver: int) -> pd.DataFrame:
     return df.dropna(how="all").fillna("")
 
 def _read_ws_by_name(logical_key: str) -> pd.DataFrame:
-    if GSHEET is None:
-        return pd.DataFrame()
+    if GSHEET is None: return pd.DataFrame()
     ws = _ws(TAB_NAMES[logical_key])
-    if ws is None:
-        return pd.DataFrame()
+    if ws is None: return pd.DataFrame()
     try:
-        # cache key uses sheet URL + tab name + version
         sheet_url = st.secrets["master_store"]["sheet_url"]
         return _read_ws_cached(sheet_url, ws.title, st.session_state["gs_ver"])
     except Exception as e:
         st.error(f"Read failed for '{ws.title}': {e}")
         return pd.DataFrame()
 
+def _write_ws_by_name(logical_key: str, df: pd.DataFrame):
+    ws = _ws(TAB_NAMES[logical_key])
+    if ws is None or df is None: return False
+    try:
+        import gspread_dataframe as gd
+        ws.clear()
+        gd.set_with_dataframe(ws, df.reset_index(drop=True), include_index=False, include_column_header=True)
+        # Bust cache version so subsequent reads bypass the 2-minute cache
+        st.session_state["gs_ver"] += 1
+        return True
+    except Exception as e:
+        st.error(f"Write failed for '{TAB_NAMES[logical_key]}': {e}")
+        return False
 
 # ───────────────────────────────────────────────────────────────────────────────
 # Calls processing
@@ -364,13 +380,7 @@ def upload_section(section_id: str, title: str, expander_flag: str) -> Tuple[str
     st.divider()
     return period_key, uploaded
 
-# Everyone can access uploaders for now (gating code kept but commented)
-# is_reporter = True
-# try:
-#     allowed = set(st.secrets.get("report_access", {}).get("reporters", []))
-#     is_reporter = (username in allowed) or (name in allowed) if allowed else False
-# except Exception:
-#     is_reporter = False
+# Everyone can access uploaders for now
 is_reporter = True
 
 # Session for dedupe
@@ -720,7 +730,6 @@ def _conv_mask_by_month(df: pd.DataFrame, date_col: str) -> pd.Series:
             mask &= s.dt.month.astype("Int64") == int(month_num)
     return mask & s.notna()
 
-# Load masters already fetched: df_leads, df_init, df_disc, df_ncl
 def _soft_has(df, col): return (df is not None) and (col in df.columns)
 
 missing_msgs = []
@@ -832,7 +841,7 @@ else:
         )
 
 # ───────────────────────────────────────────────────────────────────────────────
-# Sidebar: Master Data + Admin maintenance tools
+# Sidebar: Master Data + Admin maintenance tools (+ Refresh)
 # ───────────────────────────────────────────────────────────────────────────────
 with st.sidebar.expander("📦 Master Data (Google Sheets) — Admin", expanded=False):
     if GSHEET is None:
@@ -840,6 +849,9 @@ with st.sidebar.expander("📦 Master Data (Google Sheets) — Admin", expanded=
     else:
         st.success("Connected to Master Store (Google Sheets).")
         st.caption("Tabs used: " + ", ".join(TAB_NAMES.values()))
+        if st.button("🔄 Refresh data now"):
+            st.session_state["gs_ver"] += 1
+            st.experimental_rerun()
 
         # Sheet selector
         sheets = {
