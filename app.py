@@ -840,7 +840,7 @@ with st.sidebar.expander("📦 Master Data (Google Sheets) — Admin", expanded=
 
         if st.button("🔄 Refresh data now", use_container_width=True):
             st.session_state["gs_ver"] += 1
-            st.experimental_rerun()
+            st.rerun()
 
         sheets = {
             "Calls": "CALLS",
@@ -949,7 +949,7 @@ with st.sidebar.expander("📦 Master Data (Google Sheets) — Admin", expanded=
                     else:
                         st.session_state.get("hashes_conv", set()).clear()
                     st.session_state["gs_ver"] += 1
-                    st.experimental_rerun()
+                    st.rerun()
                 else:
                     st.warning("Nothing purged (missing date column or unsupported for this sheet).")
 
@@ -961,7 +961,7 @@ with st.sidebar.expander("📦 Master Data (Google Sheets) — Admin", expanded=
                 st.success(f"Removed {removed} duplicate row(s).") if ok else st.error("Re-dedupe failed.")
                 if ok:
                     st.session_state["gs_ver"] += 1
-                    st.experimental_rerun()
+                    st.rerun()
 
         with st.container(border=True):
             st.markdown("**Wipe ALL rows**")
@@ -976,4 +976,4 @@ with st.sidebar.expander("📦 Master Data (Google Sheets) — Admin", expanded=
                     else:
                         st.session_state.get("hashes_conv", set()).clear()
                     st.session_state["gs_ver"] += 1
-                    st.experimental_rerun()
+                    st.rerun()
