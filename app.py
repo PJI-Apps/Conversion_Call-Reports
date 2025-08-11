@@ -1,5 +1,5 @@
 # app.py
-# PJI Law • Conversion and Call Report (Streamlit)
+# PJI Law • Conversion and Call Report (Streamlit) — with Master Reset + quieter UX
 
 import io
 import re
@@ -68,6 +68,36 @@ except Exception as e:
 st.title("📊 Conversion and Call Report")
 
 # ───────────────────────────────────────────────────────────────────────────────
+# Quiet messaging helpers
+# ───────────────────────────────────────────────────────────────────────────────
+def _tech_mode() -> bool:
+    # Toggle technical details inside admin expander (defined later); default False
+    return st.session_state.get("__show_tech__", False)
+
+def info(msg: str):
+    # Friendly notice; keep UI calm
+    try:
+        st.toast(msg)  # non-intrusive if supported
+    except Exception:
+        st.info(msg)
+
+def ok(msg: str):
+    try:
+        st.toast(msg)
+    except Exception:
+        st.success(msg)
+
+def warn(msg: str):
+    # Use warning sparingly
+    st.warning(msg)
+
+def fail(msg: str, exc: Optional[Exception] = None):
+    # Friendly failure, show trace only if tech mode ON
+    st.error(msg)
+    if exc is not None and _tech_mode():
+        st.exception(exc)
+
+# ───────────────────────────────────────────────────────────────────────────────
 # Google Sheets master + caching
 # ───────────────────────────────────────────────────────────────────────────────
 TAB_NAMES = {
@@ -113,12 +143,12 @@ def _gsheet_client():
     try:
         return _gsheet_client_cached()
     except Exception as e:
-        st.warning(f"Master store unavailable: {e}")
+        warn(f"Master store unavailable. (Open admin → Show technical details for full info.)")
+        if _tech_mode():
+            st.exception(e)
         return None, None
 
 GC, GSHEET = _gsheet_client()
-
-# Replace your existing _ws function with this:
 
 def _ws(title: str):
     """
@@ -130,33 +160,28 @@ def _ws(title: str):
     if GSHEET is None:
         return None
 
-    import gspread
     from gspread.exceptions import APIError, WorksheetNotFound
 
-    # Try the exact title first, with a couple of soft retries (helps with 429s).
+    # Try exact title first with soft retries
     for delay in (0.0, 0.8, 1.6):
         try:
             if delay:
                 import time; time.sleep(delay)
             return GSHEET.worksheet(title)
         except WorksheetNotFound:
-            break  # it's actually missing → we'll handle below
+            break  # actually missing
         except APIError as e:
-            # For non-404 errors (e.g., 429), try again before giving up
-            last = str(e)
             if delay == 1.6:
-                # On final failure, fall through to fallback search before considering add
                 pass
             else:
                 continue
         except Exception:
-            # Unknown transient error → try again once or fall through
             if delay == 1.6:
                 pass
             else:
                 continue
 
-    # Try fallbacks (e.g., a legacy tab name the sheet might already have)
+    # Try fallbacks (legacy tab names)
     for fb in TAB_FALLBACKS.get(title, []):
         for delay in (0.0, 0.8):
             try:
@@ -170,28 +195,25 @@ def _ws(title: str):
             except Exception:
                 continue
 
-    # As a last resort, create it. If another process created it first,
-    # the add may fail with "already exists" → fetch it again.
+    # Last resort: create; if race, open again
     try:
         GSHEET.add_worksheet(title=title, rows=2000, cols=40)
         return GSHEET.worksheet(title)
     except APIError as e:
         if "already exists" in str(e):
-            # Race condition: someone else created it. Just return it.
             try:
                 return GSHEET.worksheet(title)
             except Exception as e2:
-                st.error(f"Worksheet '{title}' exists but could not be opened: {e2}")
+                fail(f"Worksheet '{title}' exists but could not be opened.", e2)
                 return None
         else:
-            st.error(f"Could not access/create worksheet '{title}': {e}")
+            fail(f"Could not access/create worksheet '{title}'.", e)
             return None
     except Exception as e:
-        st.error(f"Could not access/create worksheet '{title}': {e}")
+        fail(f"Could not access/create worksheet '{title}'.", e)
         return None
 
-
-@st.cache_data(ttl=120, show_spinner=False)
+@st.cache_data(ttl=300, show_spinner=False)
 def _read_ws_cached(sheet_url: str, tab_title: str, ver: int) -> pd.DataFrame:
     """Read a worksheet; cached; small backoff to avoid 429s."""
     import gspread_dataframe as gd
@@ -226,7 +248,9 @@ def _read_ws_by_name(logical_key: str) -> pd.DataFrame:
         sheet_url = st.secrets["master_store"]["sheet_url"]
         return _read_ws_cached(sheet_url, ws.title, st.session_state["gs_ver"])
     except Exception as e:
-        st.error(f"Read failed for '{ws.title}': {e}")
+        warn(f"Read temporarily unavailable for '{ws.title}'. Try Refresh.")
+        if _tech_mode():
+            st.exception(e)
         return pd.DataFrame()
 
 def _write_ws_by_name(logical_key: str, df: pd.DataFrame):
@@ -240,7 +264,7 @@ def _write_ws_by_name(logical_key: str, df: pd.DataFrame):
         st.session_state["gs_ver"] += 1
         return True
     except Exception as e:
-        st.error(f"Write failed for '{TAB_NAMES[logical_key]}': {e}")
+        fail(f"Write failed for '{TAB_NAMES[logical_key]}'.", e)
         return False
 
 # ───────────────────────────────────────────────────────────────────────────────
@@ -329,7 +353,10 @@ def process_calls_csv(raw: pd.DataFrame, period_key: str) -> pd.DataFrame:
 
     missing = [c for c in REQUIRED_COLUMNS_CALLS if c not in df.columns]
     if missing:
-        st.error("Calls CSV headers detected: " + ", ".join(list(raw.columns)))
+        fail("Could not parse Calls CSV (headers mismatched).")
+        if _tech_mode():
+            st.write("Detected headers:", list(raw.columns))
+            st.write("Missing:", missing)
         raise ValueError(f"Calls CSV is missing columns after normalization: {missing}")
 
     df = df[df["Name"].isin(ALLOWED_CALLS)].copy()
@@ -411,7 +438,7 @@ def upload_section(section_id: str, title: str, expander_flag: str) -> Tuple[str
     )
     ok, msg = validate_single_month_range(start, end)
     if not ok:
-        st.error(msg); st.stop()
+        fail(msg); st.stop()
     period_key = month_key_from_range(start, end)
 
     uploaded = st.file_uploader(
@@ -436,15 +463,20 @@ with st.expander("🧾 Data Upload (Calls & Conversion)", expanded=st.session_st
     if st.button("Allow re-upload of the same files this session"):
         st.session_state.get("hashes_calls", set()).clear()
         st.session_state.get("hashes_conv", set()).clear()
-        st.success("Duplicate-file guard reset. You can re-upload the same files now.")
+        ok("You can re-upload the same files now (session guard cleared).")
 
     # Calls uploader (single-month)
     calls_period_key, calls_uploader = upload_section("zoom_calls", "Zoom Calls", "exp_upload_open")
+    force_replace_calls = st.checkbox(
+        "Replace this month in Calls if it already exists",
+        key="force_calls_replace"
+    )
+
     if calls_uploader:
         try:
             fhash = file_md5(calls_uploader)
 
-            # Smart duplicate guard: only block if same file AND month exists already
+            # Smart duplicate guard: only block if same file AND month exists already (unless forced)
             month_exists = False
             try:
                 existing = _read_ws_by_name("CALLS")
@@ -453,8 +485,8 @@ with st.expander("🧾 Data Upload (Calls & Conversion)", expanded=st.session_st
             except Exception:
                 pass
 
-            if fhash in st.session_state["hashes_calls"] and month_exists:
-                st.warning("Calls: same file and month already present — upload skipped.")
+            if fhash in st.session_state["hashes_calls"] and month_exists and not force_replace_calls:
+                info("Calls: same file and month already present — upload skipped.")
             else:
                 raw = pd.read_csv(calls_uploader)
                 processed = process_calls_csv(raw, calls_period_key)
@@ -467,10 +499,16 @@ with st.expander("🧾 Data Upload (Calls & Conversion)", expanded=st.session_st
                 processed_clean = processed[CALLS_MASTER_COLS].copy()
 
                 if GSHEET is None:
-                    st.warning("Master store not configured; Calls will not persist.")
+                    warn("Master store not configured; Calls will not persist.")
                     df_calls_master = processed_clean.copy()
                 else:
                     current = _read_ws_by_name("CALLS")
+                    if force_replace_calls and month_exists and not current.empty:
+                        # drop that month before appending (overwrite behavior)
+                        current = current.loc[
+                            current["Month-Year"].astype(str).str.strip() != calls_period_key
+                        ].copy()
+
                     combined = (pd.concat([current, processed_clean], ignore_index=True)
                                 if not current.empty else processed_clean.copy())
                     # Dedupe by Month-Year + Name + Category
@@ -479,13 +517,13 @@ with st.expander("🧾 Data Upload (Calls & Conversion)", expanded=st.session_st
                            combined["Category"].astype(str).str.strip())
                     combined = combined.loc[~key.duplicated(keep="last")].copy()
                     _write_ws_by_name("CALLS", combined)
-                    st.success(f"Calls: upserted {len(processed_clean)} row(s) into '{TAB_NAMES['CALLS']}'.")
+                    ok(f"Calls data saved.")
                     df_calls_master = combined.copy()
                 st.session_state["hashes_calls"].add(fhash)
         except Exception as e:
-            st.error("Could not parse Calls CSV."); st.exception(e)
+            fail("Could not process Calls file. Please check headers and try again.", e)
 
-    # Conversion uploaders (date range)
+    # Conversion uploaders (date range; same quiet UX)
     c1, c2 = st.columns(2)
     upload_start = c1.date_input(
         "Conversion upload start date",
@@ -502,7 +540,7 @@ with st.expander("🧾 Data Upload (Calls & Conversion)", expanded=st.session_st
         args=("exp_upload_open",),
     )
     if upload_start > upload_end:
-        st.error("Upload start must be on or before end.")
+        fail("Upload start must be on or before end.")
 
     def _read_any(upload):
         if upload is None: return None
@@ -540,10 +578,10 @@ with st.expander("🧾 Data Upload (Calls & Conversion)", expanded=st.session_st
         try:
             fhash = file_md5(upl)
             if fhash in st.session_state["hashes_conv"]:
-                st.warning(f"{key_name}: duplicate file — ignored."); continue
+                info(f"{key_name}: duplicate file — ignored."); continue
             df_up = _read_any(upl)
             if df_up is None or df_up.empty:
-                st.warning(f"{key_name}: file appears empty."); continue
+                warn(f"{key_name}: file appears empty."); continue
 
             if key_name == "NCL" and "Retained with Consult (Y/N)" in df_up.columns and "Retained With Consult (Y/N)" not in df_up.columns:
                 df_up = df_up.rename(columns={"Retained with Consult (Y/N)":"Retained With Consult (Y/N)"})
@@ -576,10 +614,10 @@ with st.expander("🧾 Data Upload (Calls & Conversion)", expanded=st.session_st
 
             combined = combined.loc[~k.duplicated(keep="last")].copy()
             _write_ws_by_name(key_name, combined)
-            st.success(f"{key_name}: upserted {len(df_up)} row(s) into '{TAB_NAMES[key_name]}'.")
+            ok(f"{key_name}: data saved.")
             st.session_state["hashes_conv"].add(fhash)
         except Exception as e:
-            st.error(f"{key_name}: upload failed."); st.exception(e)
+            fail(f"{key_name}: upload failed. Please check the file and try again.", e)
 
 # Load masters
 df_calls = _read_ws_by_name("CALLS") if GSHEET is not None else locals().get("df_calls_master", pd.DataFrame())
@@ -678,7 +716,7 @@ try:
     plotly_ok = True
 except Exception:
     plotly_ok = False
-    st.info("Charts unavailable (install `plotly>=5.22` in requirements.txt).")
+    info("Charts unavailable (install `plotly>=5.22` in requirements.txt).")
 
 if not view_calls.empty and plotly_ok:
     vol = (view_calls.groupby("Month-Year", as_index=False)[
@@ -729,7 +767,7 @@ if not view_calls.empty and plotly_ok:
         st.plotly_chart(fig3, use_container_width=True)
 
 # ───────────────────────────────────────────────────────────────────────────────
-# Conversion Report
+# Conversion Report (unchanged logic, quiet messaging)
 # ───────────────────────────────────────────────────────────────────────────────
 st.markdown("---")
 st.header("Conversion Report")
@@ -767,7 +805,7 @@ if conv_months:
                                    index=(mnames.index(default_mname) if default_mname in mnames else 0))
 else:
     sel_year_conv, sel_mname_conv = "All", "All"
-    st.info("No month metadata detected yet in Conversion datasets.")
+    info("No month metadata detected yet in Conversion datasets.")
 
 def _conv_mask_by_month(df: pd.DataFrame, date_col: str) -> pd.Series:
     if df is None or df.empty or date_col not in df.columns:
@@ -791,12 +829,12 @@ if not _soft_has(df_leads, "Stage"): missing_msgs.append("[Leads_PNCs] missing `
 if not _soft_has(df_init, "Sub Status"): missing_msgs.append("[Initial_Consultation] missing `Sub Status`")
 if not _soft_has(df_disc, "Sub Status"): missing_msgs.append("[Discovery_Meeting] missing `Sub Status`")
 if not _soft_has(df_ncl, "Date we had BOTH the signed CLA and full payment"):
-    missing_msgs.append("[New Client List] missing `Date we had BOTH the signed CLA and full payment`")
-if missing_msgs:
-    st.info("Some datasets are missing columns: " + "; ".join(missing_msgs))
+    missing_msgs.append("[New Client List] missing date column")
+if missing_msgs and _tech_mode():
+    st.info("Missing columns: " + "; ".join(missing_msgs))
 
 if any(df is None or df.empty for df in [df_leads, df_init, df_disc, df_ncl]):
-    st.info("One or more Conversion masters are empty. Upload data in the uploader above.")
+    st.info("Upload Leads/PNCs, Initial_Consultation, Discovery_Meeting and New Client List to see the Conversion Report.")
     st.dataframe(pd.DataFrame({"Metric": [], "Value": []}), hide_index=True, use_container_width=True)
 else:
     row1 = int(
@@ -885,7 +923,7 @@ else:
         )
 
 # ───────────────────────────────────────────────────────────────────────────────
-# Sidebar: Master Data — Admin (stacked layout)
+# Sidebar: Master Data — Admin (stacked layout + MASTER RESET)
 # ───────────────────────────────────────────────────────────────────────────────
 with st.sidebar.expander("📦 Master Data (Google Sheets) — Admin", expanded=False):
     if GSHEET is None:
@@ -893,6 +931,9 @@ with st.sidebar.expander("📦 Master Data (Google Sheets) — Admin", expanded=
     else:
         st.success("Connected to Master Store (Google Sheets).")
         st.caption("Tabs used: " + ", ".join(TAB_NAMES.values()))
+
+        # Toggle for technical verbosity
+        st.session_state["__show_tech__"] = st.checkbox("Show technical details", value=False)
 
         if st.button("🔄 Refresh data now", use_container_width=True):
             st.session_state["gs_ver"] += 1
@@ -923,8 +964,14 @@ with st.sidebar.expander("📦 Master Data (Google Sheets) — Admin", expanded=
                 return "Discovery Meeting With Pji Law"
             return None  # LEADS has no canonical date; CALLS uses Month-Year
 
+        def _read_for_admin(logical_key: str) -> pd.DataFrame:
+            try:
+                return _read_ws_by_name(logical_key)
+            except Exception:
+                return pd.DataFrame()
+
         def _purge_month(logical_key: str, year: int, month: int) -> tuple[bool, int]:
-            df = _read_ws_by_name(logical_key)
+            df = _read_for_admin(logical_key)
             if df.empty:
                 return True, 0
 
@@ -932,8 +979,8 @@ with st.sidebar.expander("📦 Master Data (Google Sheets) — Admin", expanded=
                 mkey = f"{year}-{month:02d}"
                 before = len(df)
                 df2 = df.loc[df["Month-Year"].astype(str).str.strip() != mkey].copy()
-                ok = _write_ws_by_name(logical_key, df2)
-                return ok, before - len(df2)
+                ok_write = _write_ws_by_name(logical_key, df2)
+                return ok_write, before - len(df2)
 
             date_col = _date_col_for(logical_key)
             if not date_col or date_col not in df.columns:
@@ -943,14 +990,14 @@ with st.sidebar.expander("📦 Master Data (Google Sheets) — Admin", expanded=
             mask_drop = (s.dt.year == int(year)) & (s.dt.month == int(month))
             removed = int(mask_drop.sum())
             df2 = df.loc[~mask_drop].copy()
-            ok = _write_ws_by_name(logical_key, df2)
-            return ok, removed
+            ok_write = _write_ws_by_name(logical_key, df2)
+            return ok_write, removed
 
         def _wipe_all(logical_key: str) -> bool:
             return _write_ws_by_name(logical_key, pd.DataFrame())
 
         def _dedupe_sheet(logical_key: str) -> tuple[bool, int]:
-            df = _read_ws_by_name(logical_key)
+            df = _read_for_admin(logical_key)
             if df.empty:
                 return True, 0
 
@@ -985,8 +1032,8 @@ with st.sidebar.expander("📦 Master Data (Google Sheets) — Admin", expanded=
 
             before = len(df)
             df2 = df.loc[~k.duplicated(keep="last")].copy()
-            ok = _write_ws_by_name(logical_key, df2)
-            return ok, before - len(df2)
+            ok_write = _write_ws_by_name(logical_key, df2)
+            return ok_write, before - len(df2)
 
         st.divider()
         st.subheader("Maintenance")
@@ -996,9 +1043,9 @@ with st.sidebar.expander("📦 Master Data (Google Sheets) — Admin", expanded=
             st.markdown("**Purge a month**")
             st.caption("Remove all rows for the selected sheet and month (above).")
             if st.button("Purge Month", use_container_width=True):
-                ok, removed = _purge_month(key, int(yr), int(mo))
-                if ok:
-                    st.success(f"Purged {removed} row(s) for {int(yr)}-{int(mo):02d} in '{sel_label}'.")
+                ok_write, removed = _purge_month(key, int(yr), int(mo))
+                if ok_write:
+                    ok(f"Purged {removed} row(s) for {int(yr)}-{int(mo):02d} in '{sel_label}'.")
                     # auto-clear duplicate guards and refresh cache
                     if key == "CALLS":
                         st.session_state.get("hashes_calls", set()).clear()
@@ -1007,29 +1054,64 @@ with st.sidebar.expander("📦 Master Data (Google Sheets) — Admin", expanded=
                     st.session_state["gs_ver"] += 1
                     st.rerun()
                 else:
-                    st.warning("Nothing purged (missing date column or unsupported for this sheet).")
+                    warn("Nothing purged (missing date column or unsupported for this sheet).")
 
         with st.container(border=True):
             st.markdown("**Re-dedupe sheet**")
             st.caption("Rebuilds unique rows using the same keys as the uploader.")
             if st.button("Re-dedupe sheet", use_container_width=True):
-                ok, removed = _dedupe_sheet(key)
-                st.success(f"Removed {removed} duplicate row(s).") if ok else st.error("Re-dedupe failed.")
-                if ok:
+                ok_write, removed = _dedupe_sheet(key)
+                ok(f"Removed {removed} duplicate row(s).") if ok_write else fail("Re-dedupe failed.")
+                if ok_write:
                     st.session_state["gs_ver"] += 1
                     st.rerun()
 
         with st.container(border=True):
-            st.markdown("**Wipe ALL rows**")
+            st.markdown("**Wipe ALL rows (selected sheet)**")
             st.caption("Deletes every row in the selected sheet. Use with care.")
             confirm_wipe = st.checkbox("I understand this cannot be undone.", key="confirm_wipe")
             if st.button("Wipe ALL rows", disabled=not confirm_wipe, use_container_width=True):
-                ok = _wipe_all(key)
-                st.success(f"All rows wiped in '{sel_label}'.") if ok else st.error("Wipe failed.")
-                if ok:
+                ok_write = _wipe_all(key)
+                ok(f"All rows wiped in '{sel_label}'.") if ok_write else fail("Wipe failed.")
+                if ok_write:
                     if key == "CALLS":
                         st.session_state.get("hashes_calls", set()).clear()
                     else:
                         st.session_state.get("hashes_conv", set()).clear()
                     st.session_state["gs_ver"] += 1
                     st.rerun()
+
+        st.divider()
+        st.subheader("Master Reset (ALL sheets & session)")
+        st.caption("Wipes every master sheet and clears session dedupe guards. Handy for clean demo runs.")
+
+        colA, colB = st.columns([1,1])
+        ar1 = colA.checkbox("Yes, wipe ALL sheets", key="mr_yes1")
+        ar2 = colB.checkbox("Yes, clear session dedupe", key="mr_yes2")
+        confirm_text = st.text_input("Type RESET to confirm", value="", help="This cannot be undone.")
+
+        def _master_reset() -> bool:
+            ok_all = True
+            # wipe each sheet (ignore failures one-by-one)
+            for logical in ["CALLS","LEADS","INIT","DISC","NCL"]:
+                try:
+                    ok_write = _wipe_all(logical)
+                    ok_all = ok_all and ok_write
+                except Exception as e:
+                    ok_all = False
+                    if _tech_mode():
+                        st.exception(e)
+            # clear dedupe guards
+            try:
+                st.session_state.get("hashes_calls", set()).clear()
+                st.session_state.get("hashes_conv", set()).clear()
+            except Exception:
+                pass
+            # bust cache + rerun
+            st.session_state["gs_ver"] += 1
+            return ok_all
+
+        if st.button("🚨 Master Reset now", use_container_width=True, disabled=not (ar1 and ar2 and confirm_text.strip().upper() == "RESET")):
+            success = _master_reset()
+            ok("Master Reset complete." if success else "Master Reset finished with some errors (see technical details).")
+            st.rerun()
