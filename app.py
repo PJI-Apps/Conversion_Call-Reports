@@ -6,6 +6,7 @@ import re
 import json
 import hashlib
 import datetime as dt
+from calendar import monthrange
 from typing import List, Dict, Tuple, Optional
 
 import pandas as pd
@@ -185,6 +186,15 @@ def _ws(title: str):
         st.error(f"Could not access/create worksheet '{title}': {e}")
         return None
 
+def _clean_datestr(x):
+    if pd.isna(x):
+        return x
+    s = str(x).strip()
+    # Collapse "at" and strip US TZ abbreviations at the end (EDT, EST, etc.)
+    s = re.sub(r"\s+at\s+", " ", s, flags=re.I)
+    s = re.sub(r"\s+(ET|EDT|EST|CT|CDT|CST|MT|MDT|MST|PT|PDT)$", "", s)
+    return s
+
 @st.cache_data(ttl=300, show_spinner=False)
 def _read_ws_cached(sheet_url: str, tab_title: str, ver: int) -> pd.DataFrame:
     """Read a worksheet; cached; small backoff to avoid 429s."""
@@ -204,10 +214,11 @@ def _read_ws_cached(sheet_url: str, tab_title: str, ver: int) -> pd.DataFrame:
     if last_exc is not None:
         raise last_exc
     df = df.loc[:, ~df.columns.str.contains("^Unnamed")]
+    # Clean/parse likely date columns
     for c in df.columns:
         cl = c.lower()
         if "date" in cl or "with pji law" in cl:
-            df[c] = pd.to_datetime(df[c], errors="coerce")
+            df[c] = pd.to_datetime(df[c].map(_clean_datestr), errors="coerce")
     return df.dropna(how="all").fillna("")
 
 def _read_ws_by_name(logical_key: str) -> pd.DataFrame:
@@ -374,6 +385,37 @@ def _keep_open_flag(flag_key: str):
 
 if "exp_upload_open" not in st.session_state:
     st.session_state["exp_upload_open"] = False
+
+# ───────────────────────────────────────────────────────────────────────────────
+# Utilities for Conversion period selection
+# ───────────────────────────────────────────────────────────────────────────────
+def _month_bounds(year: int, month: int):
+    last_day = monthrange(year, month)[1]
+    start = dt.date(year, month, 1)
+    end   = dt.date(year, month, last_day)
+    return start, end
+
+def _clamp_to_today(end_date: dt.date) -> dt.date:
+    today = dt.date.today()
+    return min(end_date, today)
+
+def _week_bucket_range(year: int, month: int, bucket: int):
+    # bucket: 1..4 mapping to 1–7, 8–14, 15–21, 22–end
+    start_month, end_month = _month_bounds(year, month)
+    if bucket == 1:
+        return start_month, min(start_month.replace(day=7), end_month)
+    if bucket == 2:
+        s = start_month.replace(day=8);  e = min(start_month.replace(day=14), end_month);  return s, e
+    if bucket == 3:
+        s = start_month.replace(day=15); e = min(start_month.replace(day=21), end_month); return s, e
+    # bucket 4
+    return start_month.replace(day=22), end_month
+
+def _mask_by_range_dates(df: pd.DataFrame, date_col: str, start: dt.date, end: dt.date) -> pd.Series:
+    if df is None or df.empty or date_col not in df.columns:
+        return pd.Series([False] * (0 if df is None else len(df)))
+    s = pd.to_datetime(df[date_col], errors="coerce").dt.date
+    return (s >= start) & (s <= end)
 
 # ───────────────────────────────────────────────────────────────────────────────
 # Data Upload (Calls & Conversion)
@@ -787,160 +829,169 @@ if not view_calls.empty and plotly_ok:
         st.plotly_chart(fig3, use_container_width=True)
 
 # ───────────────────────────────────────────────────────────────────────────────
-# Conversion Report
+# Conversion Report (with advanced period selector)
 # ───────────────────────────────────────────────────────────────────────────────
 st.markdown("---")
 st.header("Conversion Report")
 
-months_map = {"01":"January","02":"February","03":"March","04":"April","05":"May","06":"June",
-              "07":"July","08":"August","09":"September","10":"October","11":"November","12":"December"}
-def month_num_to_name(n): return months_map.get(n, n)
+# Period selector (MTD / Full month / YTD / Week of month / Custom)
+cols_top = st.columns([1,1,2])
+period_mode = cols_top[2].radio(
+    "Period",
+    ["Month to date", "Full month", "Year to date", "Week of month", "Custom range"],
+    horizontal=True,
+)
 
-def _extract_months_from(df: pd.DataFrame, date_cols: list[str]) -> set[str]:
-    if df is None or df.empty: return set()
-    all_months = set()
-    for col in date_cols:
-        if col in df.columns:
-            s = pd.to_datetime(df[col], errors="coerce")
-            all_months |= set(s.dt.strftime("%Y-%m").dropna())
-    return all_months
+# Determine available years from data (fallback to current year)
+def _years_from(*dfs_cols):
+    ys = set()
+    for df, col in dfs_cols:
+        if df is not None and not df.empty and col in df.columns:
+            ys |= set(pd.to_datetime(df[col], errors="coerce").dt.year.dropna().astype(int))
+    return ys
 
-conv_months = set()
-conv_months |= _extract_months_from(df_ncl,  ["Date we had BOTH the signed CLA and full payment"])
-conv_months |= _extract_months_from(df_init, ["Initial Consultation With Pji Law"])
-conv_months |= _extract_months_from(df_disc, ["Discovery Meeting With Pji Law"])
-conv_months = sorted(m for m in conv_months if isinstance(m, str))
+years_detected = _years_from(
+    (df_ncl,  "Date we had BOTH the signed CLA and full payment"),
+    (df_init, "Initial Consultation With Pji Law"),
+    (df_disc, "Discovery Meeting With Pji Law"),
+)
+years_conv = sorted(years_detected) if years_detected else [dt.date.today().year]
 
-if conv_months:
-    latest_my = max(conv_months)
-    years = sorted({m.split("-")[0] for m in conv_months})
-    cyr, cmo = st.columns(2)
-    sel_year_conv = cyr.selectbox("Year (Conversion)", ["All"] + years,
-                                  index=(years.index(latest_my.split("-")[0])+1 if latest_my.split("-")[0] in years else 0))
-    def months_for_year(y): return sorted({m.split("-")[1] for m in conv_months if y == "All" or m.startswith(y)})
-    mnums = months_for_year(sel_year_conv)
-    mnames = ["All"] + [month_num_to_name(m) for m in mnums]
-    default_mname = month_num_to_name(latest_my.split("-")[1])
-    sel_mname_conv = cmo.selectbox("Month (Conversion)", mnames,
-                                   index=(mnames.index(default_mname) if default_mname in mnames else 0))
-else:
-    sel_year_conv, sel_mname_conv = "All", "All"
-    st.info("No month metadata detected yet in Conversion datasets.")
+months_map_names = {
+    1:"January",2:"February",3:"March",4:"April",5:"May",6:"June",
+    7:"July",8:"August",9:"September",10:"October",11:"November",12:"December"
+}
+month_nums = list(months_map_names.keys())
 
-def _conv_mask_by_month(df: pd.DataFrame, date_col: str) -> pd.Series:
-    if df is None or df.empty or date_col not in df.columns:
-        return pd.Series([False]* (0 if df is None else len(df)))
-    s = pd.to_datetime(df[date_col], errors="coerce")
-    if sel_year_conv == "All" and sel_mname_conv == "All":
-        return s.notna()
-    mask = pd.Series(True, index=df.index)
-    if sel_year_conv != "All":
-        mask &= s.dt.year.astype("Int64") == int(sel_year_conv)
-    if sel_mname_conv != "All":
-        month_num = next((k for k, v in months_map.items() if v == sel_mname_conv), None)
-        if month_num:
-            mask &= s.dt.month.astype("Int64") == int(month_num)
-    return mask & s.notna()
+cyr, cmo = st.columns(2)
+sel_year_conv = cyr.selectbox("Year", years_conv, index=len(years_conv)-1)
+sel_month_num = cmo.selectbox("Month", month_nums, index=dt.date.today().month-1, format_func=lambda m: months_map_names[m])
 
-def _soft_has(df, col): return (df is not None) and (col in df.columns)
+bucket = None
+if period_mode == "Week of month":
+    bucket = st.selectbox("Week of month", [1,2,3,4], index=0, format_func=lambda b: f"Week {b} ({['1–7','8–14','15–21','22–end'][b-1]})")
 
-missing_msgs = []
-if not _soft_has(df_leads, "Stage"): missing_msgs.append("[Leads_PNCs] missing `Stage`")
-if not _soft_has(df_init, "Sub Status"): missing_msgs.append("[Initial_Consultation] missing `Sub Status`")
-if not _soft_has(df_disc, "Sub Status"): missing_msgs.append("[Discovery_Meeting] missing `Sub Status`")
-if not _soft_has(df_ncl, "Date we had BOTH the signed CLA and full payment"):
-    missing_msgs.append("[New Client List] missing `Date we had BOTH the signed CLA and full payment`")
-if missing_msgs:
-    st.caption("Note: " + "; ".join(missing_msgs))
+cust_cols = st.columns(2)
+custom_start = custom_end = None
+if period_mode == "Custom range":
+    custom_start = cust_cols[0].date_input("Start date", value=dt.date.today().replace(day=1))
+    custom_end   = cust_cols[1].date_input("End date",   value=dt.date.today())
+    if custom_start > custom_end:
+        st.error("Start date must be on or before End date.")
+        st.stop()
 
-if any(df is None or df.empty for df in [df_leads, df_init, df_disc, df_ncl]):
-    st.info("One or more Conversion masters are empty. Upload data in the uploader above.")
-    st.dataframe(pd.DataFrame({"Metric": [], "Value": []}), hide_index=True, use_container_width=True)
-else:
-    row1 = int(
-        df_leads.loc[
-            df_leads["Stage"].astype(str).str.strip() != "Marketing/Scam/Spam (Non-Lead)"
-        ].shape[0]
-    )
-    EXCLUDED_PNC_STAGES = {
-        "Marketing/Scam/Spam (Non-Lead)","Referred Out","No Stage","New Lead",
-        "No Follow Up (No Marketing/Communication)","No Follow Up (Receives Marketing/Communication)",
-        "Anastasia E","Aneesah S.","Azariah P.","Earl M.","Faeryal S.","Kaithlyn M.",
-        "Micayla S.","Nathanial B.","Rialet v H.","Sihle G.","Thabang T.","Tiffany P",
-        ":Chloe L:","Nobuhle M."
-    }
-    row2 = int(
-        df_leads.loc[
-            ~df_leads["Stage"].astype(str).str.strip().isin(EXCLUDED_PNC_STAGES)
-        ].shape[0]
-    )
-
-    init_mask = _conv_mask_by_month(df_init, "Initial Consultation With Pji Law")
-    disc_mask = _conv_mask_by_month(df_disc, "Discovery Meeting With Pji Law")
-    ncl_mask  = _conv_mask_by_month(df_ncl,  "Date we had BOTH the signed CLA and full payment")
-
-    init_in = df_init.loc[init_mask].copy()
-    disc_in = df_disc.loc[disc_mask].copy()
-    ncl_in  = df_ncl.loc[ncl_mask].copy()
-
-    ncl_flag_col = None
-    for candidate in ["Retained With Consult (Y/N)", "Retained with Consult (Y/N)"]:
-        if candidate in df_ncl.columns:
-            ncl_flag_col = candidate; break
-    if ncl_flag_col:
-        flag_in = ncl_in[ncl_flag_col].astype(str).str.strip().str.upper()
-        row3 = int((flag_in == "N").sum())
-        row8 = int((flag_in != "N").sum())
+# Resolve to (start_date, end_date)
+if period_mode == "Month to date":
+    mstart, mend = _month_bounds(sel_year_conv, sel_month_num)
+    if dt.date.today().month == sel_month_num and dt.date.today().year == sel_year_conv:
+        start_date, end_date = mstart, _clamp_to_today(mend)
     else:
-        row3 = 0
-        row8 = int(ncl_in.shape[0])
+        start_date, end_date = mstart, mend
+elif period_mode == "Full month":
+    start_date, end_date = _month_bounds(sel_year_conv, sel_month_num)
+elif period_mode == "Year to date":
+    y_start = dt.date(sel_year_conv, 1, 1)
+    y_end   = _clamp_to_today(dt.date(sel_year_conv, 12, 31)) if sel_year_conv == dt.date.today().year else dt.date(sel_year_conv, 12, 31)
+    start_date, end_date = y_start, y_end
+elif period_mode == "Week of month":
+    start_date, end_date = _week_bucket_range(sel_year_conv, sel_month_num, bucket or 1)
+else:
+    start_date, end_date = custom_start, custom_end
 
-    row10 = int(ncl_in.shape[0])
-    row4 = int(init_in.shape[0] + disc_in.shape[0])
-    row6 = int(
-        (init_in["Sub Status"].astype(str).str.strip() == "Pnc").sum()
-        + (disc_in["Sub Status"].astype(str).str.strip() == "Pnc").sum()
-    )
+st.caption(f"Showing Conversion metrics for **{start_date:%-d %b %Y} → {end_date:%-d %b %Y}**")
 
-    def _pct(numer, denom): return 0 if (denom is None or denom == 0) else round((numer/denom)*100)
+# Apply the date range to each dataset
+init_mask = _mask_by_range_dates(df_init, "Initial Consultation With Pji Law", start_date, end_date)
+disc_mask = _mask_by_range_dates(df_disc, "Discovery Meeting With Pji Law", start_date, end_date)
+ncl_mask  = _mask_by_range_dates(df_ncl,  "Date we had BOTH the signed CLA and full payment", start_date, end_date)
 
-    row5  = _pct(row4, (row2 - row3))
-    row7  = _pct(row6, row4)
-    row9  = _pct(row8, row4)
-    row11 = _pct(row10, row2)
+init_in = df_init.loc[init_mask].copy() if not df_init.empty else pd.DataFrame()
+disc_in = df_disc.loc[disc_mask].copy() if not df_disc.empty else pd.DataFrame()
+ncl_in  = df_ncl.loc[ncl_mask].copy()  if not df_ncl.empty  else pd.DataFrame()
 
-    kpi_rows = pd.DataFrame({
-        "Metric": [
-            "# of Leads",
-            "# of PNCs",
-            "PNCs who retained without consultation",
-            "PNCs who scheduled consultation",
-            "% of remaining PNCs who scheduled consult",
-            "# of PNCs who showed up for consultation",
-            "% of PNCs who scheduled consult showed up",
-            "PNCs who retained after scheduled consult",
-            "% of PNCs who retained after consult",
-            "# of Total PNCs who retained",
-            "% of total PNCs who retained",
-        ],
-        "Value": [
-            row1, row2, row3, row4, f"{row5}%", row6, f"{row7}%", row8, f"{row9}%", row10, f"{row11}%"
-        ],
-    })
-    st.dataframe(kpi_rows, hide_index=True, use_container_width=True)
+# Row 1 & 2 — by your spec, they use Leads_PNCs counts without a date filter
+row1 = int(
+    df_leads.loc[
+        df_leads["Stage"].astype(str).str.strip() != "Marketing/Scam/Spam (Non-Lead)"
+    ].shape[0]
+) if not df_leads.empty and "Stage" in df_leads.columns else 0
 
-    with st.expander("Debug details (for reconciliation)", expanded=False):
+EXCLUDED_PNC_STAGES = {
+    "Marketing/Scam/Spam (Non-Lead)","Referred Out","No Stage","New Lead",
+    "No Follow Up (No Marketing/Communication)","No Follow Up (Receives Marketing/Communication)",
+    "Anastasia E","Aneesah S.","Azariah P.","Earl M.","Faeryal S.","Kaithlyn M.",
+    "Micayla S.","Nathanial B.","Rialet v H.","Sihle G.","Thabang T.","Tiffany P",
+    ":Chloe L:","Nobuhle M."
+}
+row2 = int(
+    df_leads.loc[
+        ~df_leads["Stage"].astype(str).str.strip().isin(EXCLUDED_PNC_STAGES)
+    ].shape[0]
+) if not df_leads.empty and "Stage" in df_leads.columns else 0
+
+# NCL retained flags within filtered range
+ncl_flag_col = None
+for candidate in ["Retained With Consult (Y/N)", "Retained with Consult (Y/N)"]:
+    if candidate in ncl_in.columns:
+        ncl_flag_col = candidate; break
+if ncl_flag_col:
+    flag_in = ncl_in[ncl_flag_col].astype(str).str.strip().str.upper()
+    row3 = int((flag_in == "N").sum())
+    row8 = int((flag_in != "N").sum())
+else:
+    row3 = 0
+    row8 = int(ncl_in.shape[0])
+
+row10 = int(ncl_in.shape[0])
+row4 = int(init_in.shape[0] + disc_in.shape[0])
+row6 = int(
+    (init_in["Sub Status"].astype(str).str.strip() == "Pnc").sum()
+    + (disc_in["Sub Status"].astype(str).str.strip() == "Pnc").sum()
+) if ("Sub Status" in init_in.columns and "Sub Status" in disc_in.columns) else 0
+
+def _pct(numer, denom): return 0 if (denom is None or denom == 0) else round((numer/denom)*100)
+
+row5  = _pct(row4, (row2 - row3))
+row7  = _pct(row6, row4)
+row9  = _pct(row8, row4)
+row11 = _pct(row10, row2)
+
+kpi_rows = pd.DataFrame({
+    "Metric": [
+        "# of Leads",
+        "# of PNCs",
+        "PNCs who retained without consultation",
+        "PNCs who scheduled consultation",
+        "% of remaining PNCs who scheduled consult",
+        "# of PNCs who showed up for consultation",
+        "% of PNCs who scheduled consult showed up",
+        "PNCs who retained after scheduled consult",
+        "% of PNCs who retained after consult",
+        "# of Total PNCs who retained",
+        "% of total PNCs who retained",
+    ],
+    "Value": [
+        row1, row2, row3, row4, f"{row5}%", row6, f"{row7}%", row8, f"{row9}%", row10, f"{row11}%"
+    ],
+})
+kpi_rows["Value"] = kpi_rows["Value"].astype(str)  # ensure no Arrow dtype issues
+st.table(kpi_rows)  # non-sortable display
+
+with st.expander("Debug details (for reconciliation)", expanded=False):
+    if not df_leads.empty and "Stage" in df_leads.columns:
         st.write("Leads_PNCs — Stage value counts", df_leads["Stage"].value_counts(dropna=False))
-        st.write("Initial_Consultation — Sub Status (in filter)", init_in["Sub Status"].value_counts(dropna=False))
-        st.write("Discovery_Meeting — Sub Status (in filter)",   disc_in["Sub Status"].value_counts(dropna=False))
-        if ncl_flag_col:
-            st.write("New Client List — Retained split (in filter)", ncl_in[ncl_flag_col].value_counts(dropna=False))
-        st.write(
-            f"Computed: Leads={row1}, PNCs={row2}, "
-            f"Retained w/out consult={row3}, Scheduled={row4} ({row5}%), "
-            f"Showed={row6} ({row7}%), Retained after consult={row8} ({row9}%), "
-            f"Total retained={row10} ({row11}%)"
-        )
+    if not init_in.empty and "Sub Status" in init_in.columns:
+        st.write("Initial_Consultation — Sub Status (in range)", init_in["Sub Status"].value_counts(dropna=False))
+    if not disc_in.empty and "Sub Status" in disc_in.columns:
+        st.write("Discovery_Meeting — Sub Status (in range)",   disc_in["Sub Status"].value_counts(dropna=False))
+    if ncl_flag_col:
+        st.write("New Client List — Retained split (in range)", ncl_in[ncl_flag_col].value_counts(dropna=False))
+    st.write(
+        f"Computed: Leads={row1}, PNCs={row2}, "
+        f"Retained w/out consult={row3}, Scheduled={row4} ({row5}%), "
+        f"Showed={row6} ({row7}%), Retained after consult={row8} ({row9}%), "
+        f"Total retained={row10} ({row11}%)"
+    )
 
 # ───────────────────────────────────────────────────────────────────────────────
 # Sidebar: Master Data — Admin (stacked layout)
