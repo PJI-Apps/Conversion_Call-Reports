@@ -1191,18 +1191,22 @@ def _retained_counts_from_ncl(ncl_df: pd.DataFrame) -> pd.Series:
     return pd.Series({name: int(counts.get(name, 0)) for name in CANON})
 
 # ---------- Build report ----------
-CANON = sum(PRACTICE_AREAS.values(), []) + OTHER_ATTORNEYS
+# Build the full roster (practice areas + explicit Other), de-duplicated in order
+CANON = list(dict.fromkeys(sum(PRACTICE_AREAS.values(), []) + OTHER_ATTORNEYS))
 
-met_counts_raw = _met_counts_from_ic_dm(df_init, df_disc)  # your existing IC/DM function
+met_counts_raw = _met_counts_from_ic_dm(df_init, df_disc)  # IC/DM "met with" (exact full names)
 met_by_attorney = {name: int(met_counts_raw.get(name, 0)) for name in CANON}
 
+# NCL retained (initials → full names) — function should already include JK/CM/JS/RB/PA etc.
 retained_by_attorney = _retained_counts_from_ncl(df_ncl)
+retained_by_attorney = {} if retained_by_attorney is None else retained_by_attorney.to_dict()
 
 report = pd.DataFrame({"Attorney": CANON})
-report["PNCs who met"] = report["Attorney"].map(lambda a: met_by_attorney.get(a, 0))
+report["PNCs who met"] = report["Attorney"].map(lambda a: int(met_by_attorney.get(a, 0)))
 report["PNCs who met and retained"] = report["Attorney"].map(lambda a: int(retained_by_attorney.get(a, 0)))
 report["Practice Area"] = report["Attorney"].map(_practice_for)
 report["Attorney_Display"] = report["Attorney"].map(lambda n: DISPLAY_NAME_OVERRIDES.get(n, n))
+
 
 
 # ---------- Render ----------
