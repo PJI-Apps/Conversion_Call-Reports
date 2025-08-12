@@ -1141,28 +1141,83 @@ def _col_fuzzy(df: pd.DataFrame, patterns: list[str]) -> str | None:
             return c
     return None
 
+# --- STRONGER datetime cleaner & parser ---
 _TZ_RE = re.compile(r"\s+(ET|EDT|EST|CT|CDT|CST|MT|MDT|MST|PT|PDT)\b", flags=re.I)
+
 def _clean_dt_text(x: str) -> str:
-    if x is None: return ""
+    if x is None:
+        return ""
     s = str(x).strip()
-    s = re.sub(r"\s+at\s+", " ", s, flags=re.I)  # " at " -> space
-    s = _TZ_RE.sub("", s)                        # drop timezone token
+    s = s.replace("–", "-").replace(",", " ")
+    s = re.sub(r"\s+at\s+", " ", s, flags=re.I)      # " at " → space
+    s = _TZ_RE.sub("", s)                            # remove trailing timezone token
+    s = re.sub(r"(\d)(am|pm)\b", r"\1 \2", s, flags=re.I)  # "12:45pm" → "12:45 pm"
+    s = re.sub(r"\s+", " ", s).strip()
     return s
 
 def _to_ts(series: pd.Series) -> pd.Series:
     s = series.astype(str).map(_clean_dt_text)
+    # first try pandas' parser
     x = pd.to_datetime(s, errors="coerce", infer_datetime_format=True)
-    try: x = x.dt.tz_localize(None)
-    except Exception: pass
+    # if any NaT remain, try common explicit formats
+    if x.isna().any():
+        fmt_list = ["%m/%d/%Y %I:%M %p", "%m/%d/%Y %H:%M", "%Y-%m-%d %H:%M", "%m/%d/%Y"]
+        y = x.copy()
+        for fmt in fmt_list:
+            mask = y.isna()
+            if not mask.any():
+                break
+            try:
+                y.loc[mask] = pd.to_datetime(s.loc[mask], format=fmt, errors="coerce")
+            except Exception:
+                pass
+        x = y
+    try:
+        x = x.dt.tz_localize(None)
+    except Exception:
+        pass
     return x
 
-def _between_inclusive(series: pd.Series, sd, ed) -> pd.Series:
-    x = _to_ts(series)
-    return (x >= pd.Timestamp(sd)) & (x <= pd.Timestamp(ed))
+def _met_counts_from_ic_dm_fuzzy(ic_df: pd.DataFrame, dm_df: pd.DataFrame, sd, ed) -> dict:
+    """Count 'PNCs who met' per attorney from IC+DM with fuzzy columns + robust dates."""
+    buckets = []
+    global _last_ic_dm_debug
+    _last_ic_dm_debug = {}
 
-def _is_blank(series: pd.Series) -> pd.Series:
-    s = series.astype(str)
-    return series.isna() | (s.str.strip() == "") | (s.str.lower().isin(["nan","none","na","null"]))
+    def _one(df, source, date_patterns, att_patterns):
+        att  = _col_fuzzy(df, att_patterns)
+        date = _col_fuzzy(df, date_patterns)
+        sub  = _col_fuzzy(df, ["sub","status"])
+        rsn  = _col_fuzzy(df, ["reason","resched"])
+        dbg = {"source": source, "att_col": att, "date_col": date, "sub_col": sub, "reason_col": rsn}
+        if att and date:
+            t = df.copy()
+            in_range = _between_inclusive(t[date], sd, ed)
+            ex_follow = (t[sub].astype(str).str.strip().str.lower().eq("follow up")) if sub else pd.Series(False, index=t.index)
+            ex_reason = (~_is_blank(t[rsn])) if rsn else pd.Series(False, index=t.index)
+            met_mask = in_range & ~ex_follow & ~ex_reason
+            dbg |= {
+                "total_rows": int(len(df)),
+                "in_range": int(in_range.sum()),
+                "excluded_followup": int(ex_follow.sum()) if sub else 0,
+                "excluded_reason": int(ex_reason.sum()) if rsn else 0,
+                "met_rows": int(met_mask.sum()),
+            }
+            _last_ic_dm_debug[source] = dbg
+            return t.loc[met_mask, att].astype(str).str.strip()
+        _last_ic_dm_debug[source] = dbg
+        return pd.Series(dtype=str)
+
+    if isinstance(ic_df, pd.DataFrame) and not ic_df.empty:
+        buckets.append(_one(ic_df, "IC", ["initial","consultation"], ["lead","attorney"]))
+    if isinstance(dm_df, pd.DataFrame) and not dm_df.empty:
+        buckets.append(_one(dm_df, "DM", ["discovery","meeting"], ["lead","attorney"]))
+
+    if not buckets:
+        return {}
+    met_series = pd.concat(buckets, ignore_index=True)
+    met_series = met_series[met_series.ne("")]
+    return met_series.value_counts(dropna=False).to_dict()
 
 # NCL initials → full names (includes JK/CM and Other)
 INITIALS_TO_ATTORNEY = {
@@ -1255,6 +1310,9 @@ except Exception as e:
     report = pd.DataFrame({"Attorney": CANON, "PNCs who met": 0, "PNCs who met and retained": 0,
                            "Practice Area": [ _practice_for(a) for a in CANON ],
                            "Attorney_Display": [ _display_safe(a) for a in CANON ]})
+
+with st.expander("🔎 IC/DM parser debug (current window)", expanded=False):
+    st.write(_last_ic_dm_debug if "_last_ic_dm_debug" in globals() else {})
 
 # ---------- Render (percent = retained / met) ----------
 def _render_three_row_card(title_name: str, met: int, kept: int):
