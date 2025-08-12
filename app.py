@@ -1167,18 +1167,59 @@ def _met_counts_from_ic_dm(df_ic: pd.DataFrame, df_dm: pd.DataFrame) -> pd.Serie
     # normalize to our canonical keys (exact match only; unknowns go to "Other" later)
     return met_counts
 
+# Combine IC+DM "met" and normalize attorney names to canonical keys
 met_counts_raw = _met_counts_from_ic_dm(df_init, df_disc)
 
-# Build a mapping from raw names to canonical names when they match exactly
-canonical_names = set(ATTORNEY_TO_INITIALS.keys())
-def _to_canonical(raw: str) -> str:
-    s = str(raw or "").strip()
-    return s if s in canonical_names else s  # keep as-is; we’ll bucket to "Other" later
+# Robust normalization: use your alias logic by last/first name tokens
+# (this mirrors the behavior you asked for earlier)
+NAME_CANON = set(ATTORNEY_TO_INITIALS.keys())
 
+# Map common last names directly to canonical
+LASTNAME_MAP = {
+    "watkins":"Connor Watkins","fox":"Jennifer Fox","megel":"Rebecca Megel",
+    "hill":"Adam Hill","kerby":"Elias Kerby","ross":"Elizabeth Ross",
+    "kizer":"Garrett Kizer","grabulis":"Kyle Grabulis","kravetz":"Sarah Kravetz",
+    "suddarth":"Andrew Suddarth","bang":"William Bang","giaimo":"Bret Giaimo",
+    "supernor":"Hannah Supernor","kouremetis":"Laura Kouremetis","stefan":"Lukios Stefan",
+    "gogoel":"William Gogoel","jaros":"Kevin Jaros",
+}
+
+# Light aliasing for first names/nicknames you specified
+FIRSTNAME_MAP = {
+    "eli":"Elias Kerby","andrew":"Andrew Suddarth","andy":"Andrew Suddarth",
+    "billy":"William Bang","will":"William Gogoel",
+    "hannah":"Hannah Supernor","laura":"Laura Kouremetis","kevin":"Kevin Jaros",
+    "connor":"Connor Watkins","jennifer":"Jennifer Fox","jen":"Jennifer Fox",
+    "rebecca":"Rebecca Megel","adam":"Adam Hill","elizabeth":"Elizabeth Ross",
+    "garrett":"Garrett Kizer","kyle":"Kyle Grabulis","sarah":"Sarah Kravetz",
+    "bret":"Bret Giaimo","lukios":"Lukios Stefan",
+}
+
+def _canon_from_raw(raw: str) -> str:
+    s = str(raw or "").strip()
+    if not s:
+        return "Other"
+    # exact
+    if s in NAME_CANON:
+        return s
+    sl = s.lower()
+    toks = [t for t in re.split(r"[,\s]+", sl) if t]
+    # last-name match (most reliable)
+    for t in toks[::-1]:  # check from end
+        if t in LASTNAME_MAP:
+            return LASTNAME_MAP[t]
+    # first-name / nickname match
+    for t in toks:
+        if t in FIRSTNAME_MAP:
+            return FIRSTNAME_MAP[t]
+    return "Other"
+
+# Normalize each raw name to a canonical key and sum
 met_by_attorney = {}
 for raw_name, cnt in met_counts_raw.items():
-    key = _to_canonical(raw_name)
+    key = _canon_from_raw(raw_name)
     met_by_attorney[key] = met_by_attorney.get(key, 0) + int(cnt)
+
 
 # ============== PNCs who met with {Attorney} and retained (NCL only) ============
 def _retained_counts_from_ncl(ncl_df: pd.DataFrame) -> pd.Series:
