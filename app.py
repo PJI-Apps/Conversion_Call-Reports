@@ -1360,6 +1360,154 @@ except Exception as e:
 with st.expander("🔎 IC/DM parser debug (current window)", expanded=False):
     st.write(_last_ic_dm_debug if "_last_ic_dm_debug" in globals() else {})
 
+# ========== EMERGENCY IC/DM SANITY + SIDE-BY-SIDE COUNTS (does not remove anything) ==========
+
+# 1) ultra-verbose column lister so we can see the raw headers
+with st.expander("🧪 IC/DM column snapshot", expanded=False):
+    def _list_cols(df, title):
+        if isinstance(df, pd.DataFrame) and not df.empty:
+            st.write(f"**{title}** shape={df.shape}")
+            st.dataframe(
+                pd.DataFrame({
+                    "idx": range(len(df.columns)),
+                    "column": list(df.columns),
+                    "norm": [re.sub(r'[^a-z0-9 ]','', re.sub(r'\s+',' ', str(c).lower().strip())) for c in df.columns]
+                }),
+                hide_index=True, use_container_width=True
+            )
+        else:
+            st.write(f"**{title}** is empty")
+    _list_cols(df_init, "Initial_Consultation (df_init)")
+    _list_cols(df_disc, "Discovery_Meeting (df_disc)")
+
+# 2) helper bits reused below
+def _is_blank(series: pd.Series) -> pd.Series:
+    s = series.astype(str)
+    return series.isna() | (s.str.strip() == "") | (s.str.lower().isin(["nan","none","na","null"]))
+
+_TZ_RE = re.compile(r"\s+(ET|EDT|EST|CT|CDT|CST|MT|MDT|MST|PT|PDT)\b", flags=re.I)
+def _clean_dt_text(x: str) -> str:
+    if x is None: return ""
+    s = str(x).strip().replace("–","-").replace(",", " ")
+    s = re.sub(r"\s+at\s+"," ", s, flags=re.I)
+    s = _TZ_RE.sub("", s)
+    s = re.sub(r"(\d)(am|pm)\b", r"\1 \2", s, flags=re.I)
+    s = re.sub(r"\s+"," ", s).strip()
+    return s
+
+def _to_ts(series: pd.Series) -> pd.Series:
+    s = series.astype(str).map(_clean_dt_text)
+    x = pd.to_datetime(s, errors="coerce", infer_datetime_format=True)
+    if x.isna().any():
+        y = x.copy()
+        for fmt in ("%m/%d/%Y %I:%M %p", "%m/%d/%Y %H:%M", "%Y-%m-%d %H:%M", "%m/%d/%Y"):
+            mask = y.isna()
+            if not mask.any(): break
+            try: y.loc[mask] = pd.to_datetime(s.loc[mask], format=fmt, errors="coerce")
+            except Exception: pass
+        x = y
+    try: x = x.dt.tz_localize(None)
+    except Exception: pass
+    return x
+
+def _between(series: pd.Series, sd, ed) -> pd.Series:
+    x = _to_ts(series)
+    return (x >= pd.Timestamp(sd)) & (x <= pd.Timestamp(ed))
+
+def _col_fuzzy(df: pd.DataFrame, patterns: list[str]) -> str | None:
+    if df is None or df.empty: return None
+    def norm(s: str) -> str:
+        s = str(s).lower().strip()
+        s = re.sub(r"\s+"," ", s); s = re.sub(r"[^a-z0-9 ]","", s)
+        return s
+    tgt = [norm(p) for p in patterns if str(p).strip()]
+    cand = {c: norm(c) for c in df.columns}
+    # prefer full all-token match; else best partial containing any token
+    for c, n in cand.items():
+        if all(tok in n for tok in tgt): return c
+    # partial fallback
+    best = None
+    for c, n in cand.items():
+        if any(tok in n for tok in tgt):
+            best = best or c
+    return best
+
+# 3) strict index-based counter (IC: L/M/G/I; DM: L/P/G/I)
+def _count_by_index(ic_df, dm_df, sd, ed):
+    parts = []
+    # IC indices: L=11, M=12, G=6, I=8
+    if isinstance(ic_df, pd.DataFrame) and not ic_df.empty and ic_df.shape[1] > 12:
+        aL, dM, gG, iI = ic_df.columns[11], ic_df.columns[12], ic_df.columns[6], ic_df.columns[8]
+        t = ic_df.copy()
+        m = _between(t[dM], sd, ed)
+        m &= ~t[gG].astype(str).str.strip().str.lower().eq("follow up")
+        m &= _is_blank(t[iI])
+        parts.append(t.loc[m, aL].astype(str).str.strip())
+    # DM indices: L=11, P=15, G=6, I=8
+    if isinstance(dm_df, pd.DataFrame) and not dm_df.empty and dm_df.shape[1] > 15:
+        aL, dP, gG, iI = dm_df.columns[11], dm_df.columns[15], dm_df.columns[6], dm_df.columns[8]
+        t = dm_df.copy()
+        m = _between(t[dP], sd, ed)
+        m &= ~t[gG].astype(str).str.strip().str.lower().eq("follow up")
+        m &= _is_blank(t[iI])
+        parts.append(t.loc[m, aL].astype(str).str.strip())
+    if not parts: return {}
+    s = pd.concat(parts, ignore_index=True); s = s[s.ne("")]
+    return s.value_counts(dropna=False).to_dict()
+
+# 4) fuzzy name-based counter (Lead Attorney / IC/DM date / Sub Status / Reason)
+def _count_by_fuzzy(ic_df, dm_df, sd, ed):
+    parts = []
+    dbg = {}
+
+    if isinstance(ic_df, pd.DataFrame) and not ic_df.empty:
+        a = _col_fuzzy(ic_df, ["lead","attorney"])
+        d = _col_fuzzy(ic_df, ["initial","consultation"])
+        g = _col_fuzzy(ic_df, ["sub","status"])
+        i = _col_fuzzy(ic_df, ["reason","resched"])
+        dbg["IC"] = {"att": a, "date": d, "sub": g, "reason": i}
+        if a and d:
+            t = ic_df.copy()
+            m = _between(t[d], sd, ed)
+            if g: m &= ~t[g].astype(str).str.strip().str.lower().eq("follow up")
+            if i: m &= _is_blank(t[i])
+            parts.append(t.loc[m, a].astype(str).str.strip())
+
+    if isinstance(dm_df, pd.DataFrame) and not dm_df.empty:
+        a = _col_fuzzy(dm_df, ["lead","attorney"])
+        d = _col_fuzzy(dm_df, ["discovery","meeting"])
+        g = _col_fuzzy(dm_df, ["sub","status"])
+        i = _col_fuzzy(dm_df, ["reason","resched"])
+        dbg["DM"] = {"att": a, "date": d, "sub": g, "reason": i}
+        if a and d:
+            t = dm_df.copy()
+            m = _between(t[d], sd, ed)
+            if g: m &= ~t[g].astype(str).str.strip().str.lower().eq("follow up")
+            if i: m &= _is_blank(t[i])
+            parts.append(t.loc[m, a].astype(str).str.strip())
+
+    if not parts:
+        return {}, dbg
+    s = pd.concat(parts, ignore_index=True); s = s[s.ne("")]
+    return s.value_counts(dropna=False).to_dict(), dbg
+
+# 5) run both counters and show results
+with st.expander("🔧 IC/DM sanity (index vs fuzzy) — current window", expanded=True):
+    idx_counts = _count_by_index(df_init, df_disc, start_date, end_date)
+    fzy_counts, fzy_dbg = _count_by_fuzzy(df_init, df_disc, start_date, end_date)
+
+    st.write("**Index-based counts (L/M & L/P):**", idx_counts, "TOTAL =", sum(idx_counts.values()))
+    st.write("**Fuzzy name-based counts:**", fzy_counts, "TOTAL =", sum(fzy_counts.values()))
+    st.write("**Fuzzy column picks:**", fzy_dbg)
+
+    # OPTIONAL: if fuzzy found nothing but index did, fall back to index counts for met_by_attorney
+    use_counts = fzy_counts if sum(fzy_counts.values()) >= sum(idx_counts.values()) else idx_counts
+
+    # Make sure CANON exists (your PA + Other list)
+    CANON = list(dict.fromkeys(sum(PRACTICE_AREAS.values(), []) + OTHER_ATTORNEYS))
+    met_by_attorney = {name: int(use_counts.get(name, 0)) for name in CANON}
+
+
 # ---------- Render (percent = retained / met) ----------
 def _render_three_row_card(title_name: str, met: int, kept: int):
     met_i = int(met); kept_i = int(kept)
