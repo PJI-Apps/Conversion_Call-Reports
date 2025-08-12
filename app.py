@@ -1131,27 +1131,22 @@ def _between_dates(s, start, end):
     return x.between(pd.Timestamp(start), pd.Timestamp(end), inclusive="both")
 
 # ---------- IC/DM “met with” ----------
-def _met_counts_from_ic_dm(ic_df: pd.DataFrame, dm_df: pd.DataFrame) -> pd.Series:
+def _met_counts_from_ic_dm(ic_df: pd.DataFrame, dm_df: pd.DataFrame, start_date, end_date) -> pd.Series:
     pieces = []
-
-    if isinstance(ic_df, pd.DataFrame) and not ic_df.empty:
-        c_att, c_date, c_reason, c_sub = _col_by_idx(ic_df, 11), _col_by_idx(ic_df, 12), _col_by_idx(ic_df, 8), _col_by_idx(ic_df, 6)
-        if c_att and c_date:
-            tmp = ic_df.copy()
-            m = _between_dates(tmp[c_date], start_date, end_date)
-            if c_sub:    m &= ~tmp[c_sub].astype(str).str.strip().str.lower().eq("follow up")
-            if c_reason: m &= tmp[c_reason].astype(str).fillna("").str.strip().eq("")
-            pieces.append(tmp.loc[m, c_att].astype(str).str.strip())
-
-    if isinstance(dm_df, pd.DataFrame) and not dm_df.empty:
-        c_att, c_date, c_reason, c_sub = _col_by_idx(dm_df, 11), _col_by_idx(dm_df, 15), _col_by_idx(dm_df, 8), _col_by_idx(dm_df, 6)
-        if c_att and c_date:
-            tmp = dm_df.copy()
-            m = _between_dates(tmp[c_date], start_date, end_date)
-            if c_sub:    m &= ~tmp[c_sub].astype(str).str.strip().str.lower().eq("follow up")
-            if c_reason: m &= tmp[c_reason].astype(str).fillna("").str.strip().eq("")
-            pieces.append(tmp.loc[m, c_att].astype(str).str.strip())
-
+    for df, date_col, att_col in [
+        (ic_df, "Initial Consultation With Pji Law", "Lead Attorney"),
+        (dm_df, "Discovery Meeting With Pji Law", "Lead Attorney")
+    ]:
+        if df is not None and not df.empty and date_col in df.columns and att_col in df.columns:
+            s = pd.to_datetime(df[date_col].map(_clean_datestr), errors="coerce")
+            mask = (s.dt.date >= start_date) & (s.dt.date <= end_date)
+            # Exclude 'Follow Up' if present
+            if "Sub Status" in df.columns:
+                mask &= ~df["Sub Status"].astype(str).str.lower().str.strip().eq("follow up")
+            # Only blank Reason for Rescheduling
+            if "Reason for Rescheduling" in df.columns:
+                mask &= df["Reason for Rescheduling"].astype(str).str.strip().eq("")
+            pieces.append(df.loc[mask, att_col].astype(str).str.strip())
     if not pieces:
         return pd.Series(dtype=int)
     met_series = pd.concat(pieces, ignore_index=True)
