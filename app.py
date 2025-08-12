@@ -1236,6 +1236,110 @@ _ret_counts = _retained_counts_from_ncl_named(ncl_in)
 met_by_attorney      = {name: int(_met_counts.get(name, 0)) for name in CANON}
 retained_by_attorney = {name: int(_ret_counts.get(name, 0)) for name in CANON}
 
+# ---------- Audit helper for why "met" looks low ----------
+def _col(df: pd.DataFrame, candidates: list[str]) -> str | None:
+    if df is None or df.empty: return None
+    by_lower = {c.lower().strip(): c for c in df.columns}
+    for cand in candidates:
+        k = cand.lower().strip()
+        if k in by_lower: return by_lower[k]
+    return None
+
+def _is_blank(series: pd.Series) -> pd.Series:
+    s = series.astype(str)
+    return series.isna() | (s.str.strip() == "") | (s.str.lower().isin(["nan", "none", "na", "null"]))
+
+def _audit_ic_dm(ic_df: pd.DataFrame, dm_df: pd.DataFrame):
+    rows = []
+
+    # IC
+    if isinstance(ic_df, pd.DataFrame) and not ic_df.empty:
+        a = _col(ic_df, ["Lead Attorney","Lead atty","Attorney"])
+        d = _col(ic_df, ["Initial Consultation With Pji Law"])
+        g = _col(ic_df, ["Sub Status"])
+        i = _col(ic_df, ["Reason for Rescheduling","Reason"])
+        if a and d:
+            t = ic_df.copy()
+            t["_source"] = "IC"
+            t["_scheduled"] = True  # date already filtered by init_in
+            t["_ex_followup"] = (t[g].astype(str).str.strip().str.lower().eq("follow up")) if g else False
+            t["_ex_reason"]   = (~_is_blank(t[i])) if i else False
+            t["_counts_as_met"] = t["_scheduled"] & ~t["_ex_followup"] & ~t["_ex_reason"]
+            rows.append(t[[a, d, g, i, "_source", "_scheduled", "_ex_followup", "_ex_reason", "_counts_as_met"]]
+                          .rename(columns={a:"Lead Attorney", d:"Date", g:"Sub Status", i:"Reason"}))
+
+    # DM
+    if isinstance(dm_df, pd.DataFrame) and not dm_df.empty:
+        a = _col(dm_df, ["Lead Attorney","Lead atty","Attorney"])
+        d = _col(dm_df, ["Discovery Meeting With Pji Law"])
+        g = _col(dm_df, ["Sub Status"])
+        i = _col(dm_df, ["Reason for Rescheduling","Reason"])
+        if a and d:
+            t = dm_df.copy()
+            t["_source"] = "DM"
+            t["_scheduled"] = True  # date already filtered by disc_in
+            t["_ex_followup"] = (t[g].astype(str).str.strip().str.lower().eq("follow up")) if g else False
+            t["_ex_reason"]   = (~_is_blank(t[i])) if i else False
+            t["_counts_as_met"] = t["_scheduled"] & ~t["_ex_followup"] & ~t["_ex_reason"]
+            rows.append(t[[a, d, g, i, "_source", "_scheduled", "_ex_followup", "_ex_reason", "_counts_as_met"]]
+                          .rename(columns={a:"Lead Attorney", d:"Date", g:"Sub Status", i:"Reason"}))
+
+    if not rows:
+        return pd.DataFrame()
+
+    out = pd.concat(rows, ignore_index=True)
+    # normalize date for readability
+    out["Date"] = pd.to_datetime(out["Date"], errors="coerce")
+    out["Lead Attorney"] = out["Lead Attorney"].astype(str).str.strip()
+    return out
+
+with st.expander("🔍 Practice Area Audit (current window)", expanded=False):
+    aud = _audit_ic_dm(init_in, disc_in)
+    if aud.empty:
+        st.caption("No IC/DM rows in the selected window.")
+    else:
+        # Totals
+        total_ic_scheduled = int(((aud["_source"]=="IC") & aud["_scheduled"]).sum())
+        total_dm_scheduled = int(((aud["_source"]=="DM") & aud["_scheduled"]).sum())
+        total_ic_ex_follow = int(((aud["_source"]=="IC") & aud["_ex_followup"]).sum())
+        total_dm_ex_follow = int(((aud["_source"]=="DM") & aud["_ex_followup"]).sum())
+        total_ic_ex_reason = int(((aud["_source"]=="IC") & aud["_ex_reason"]).sum())
+        total_dm_ex_reason = int(((aud["_source"]=="DM") & aud["_ex_reason"]).sum())
+        total_ic_met       = int(((aud["_source"]=="IC") & aud["_counts_as_met"]).sum())
+        total_dm_met       = int(((aud["_source"]=="DM") & aud["_counts_as_met"]).sum())
+        total_met          = int(aud["_counts_as_met"].sum())
+
+        st.write("**IC/DM totals (current window):**")
+        st.write({
+            "IC scheduled": total_ic_scheduled,
+            "IC excluded (Follow Up)": total_ic_ex_follow,
+            "IC excluded (Reason)": total_ic_ex_reason,
+            "IC met": total_ic_met,
+            "DM scheduled": total_dm_scheduled,
+            "DM excluded (Follow Up)": total_dm_ex_follow,
+            "DM excluded (Reason)": total_dm_ex_reason,
+            "DM met": total_dm_met,
+            "TOTAL met": total_met,
+        })
+
+        # Rows counted as MET
+        st.markdown("**Rows counted as MET**")
+        st.dataframe(
+            aud.loc[aud["_counts_as_met"], ["_source","Lead Attorney","Date","Sub Status","Reason"]]
+               .sort_values(["Lead Attorney","Date"]),
+            hide_index=True, use_container_width=True
+        )
+
+        # Rows excluded (and why)
+        st.markdown("**Rows excluded (Follow Up or Reason present)**")
+        ex = aud.loc[~aud["_counts_as_met"], ["_source","Lead Attorney","Date","Sub Status","Reason","_ex_followup","_ex_reason"]]
+        # Add a quick reason label
+        ex["_why"] = ex.apply(lambda r: "Follow Up" if r["_ex_followup"] else ("Reason not blank" if r["_ex_reason"] else "—"), axis=1)
+        st.dataframe(
+            ex.sort_values(["Lead Attorney","Date"]),
+            hide_index=True, use_container_width=True
+        )
+
 # Assemble the report
 report = pd.DataFrame({"Attorney": CANON})
 report["PNCs who met"] = report["Attorney"].map(lambda a: met_by_attorney.get(a, 0))
