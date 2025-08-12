@@ -1092,6 +1092,205 @@ html_table = f"""
 """
 st.markdown(html_table, unsafe_allow_html=True)
 
+# ───────────────────────────────────────────────────────────────────────────────
+# Conversion → Practice Area (collapsible sections with attorney filter)
+# ───────────────────────────────────────────────────────────────────────────────
+st.subheader("Practice Area")
+
+# Config per spec
+PRACTICE_AREAS = {
+    "Estate Planning": ["Connor Watkins", "Jennifer Fox", "Rebecca Megel"],
+    "Estate Administration": ["Adam Hill", "Elias Kerby", "Elizabeth Ross", "Garrett Kizer", "Kyle Grabulis", "Sarah Kravetz"],
+    "Civil Litigation": ["Andrew Suddarth", "William Bang", "Bret Giaimo", "Hannah Supernor", "Laura Kouremetis", "Lukios Stefan", "William Gogoel"],
+    "Business transactional": ["Kevin Jaros"],
+}
+DISPLAY_NAME_OVERRIDES = {
+    "Elias Kerby": "Eli Kerby",
+    "William Bang": "Billy Bang",
+    "William Gogoel": "Will Gogoel",
+    "Andrew Suddarth": "Andy Suddarth",
+}
+
+# Initials map (used for NCL retained counts)
+ATTORNEY_TO_INITIALS = {
+    "Connor Watkins": "CW",
+    "Jennifer Fox": "JF",
+    "Rebecca Megel": "RM",
+    "Adam Hill": "AH",
+    "Elias Kerby": "EK",
+    "Elizabeth Ross": "ER",
+    "Garrett Kizer": "GK",
+    "Kyle Grabulis": "KG",
+    "Sarah Kravetz": "SK",
+    "Andrew Suddarth": "AS",
+    "William Bang": "WB",
+    "Bret Giaimo": "BG",
+    "Hannah Supernor": "HS",
+    "Laura Kouremetis": "LK",
+    "Lukios Stefan": "LS",
+    "William Gogoel": "WG",
+    "Kevin Jaros": "KJ",
+}
+INITIALS_TO_ATTORNEY = {v: k for k, v in ATTORNEY_TO_INITIALS.items()}
+
+# Name normalization (handles "Last, First", first-name-only, nicknames)
+ALIASES = {
+    **{n.lower(): n for n in sum(PRACTICE_AREAS.values(), [])},
+    "connor":"Connor Watkins","jennifer":"Jennifer Fox","jen":"Jennifer Fox","rebecca":"Rebecca Megel",
+    "adam":"Adam Hill","elias":"Elias Kerby","eli":"Elias Kerby","elizabeth":"Elizabeth Ross",
+    "garrett":"Garrett Kizer","kyle":"Kyle Grabulis","sarah":"Sarah Kravetz",
+    "andrew":"Andrew Suddarth","andy":"Andrew Suddarth","billy":"William Bang",
+    "bret":"Bret Giaimo","hannah":"Hannah Supernor","laura":"Laura Kouremetis",
+    "lukios":"Lukios Stefan","will":"William Gogoel","kevin":"Kevin Jaros",
+    "watkins, connor":"Connor Watkins","fox, jennifer":"Jennifer Fox","megel, rebecca":"Rebecca Megel",
+    "hill, adam":"Adam Hill","kerby, elias":"Elias Kerby","ross, elizabeth":"Elizabeth Ross",
+    "kizer, garrett":"Garrett Kizer","grabulis, kyle":"Kyle Grabulis","kravetz, sarah":"Sarah Kravetz",
+    "suddarth, andrew":"Andrew Suddarth","bang, william":"William Bang","giaimo, bret":"Bret Giaimo",
+    "supernor, hannah":"Hannah Supernor","kouremetis, laura":"Laura Kouremetis","stefan, lukios":"Lukios Stefan",
+    "gogoel, william":"William Gogoel","jaros, kevin":"Kevin Jaros",
+}
+
+def _norm_name(raw: str) -> str:
+    if not isinstance(raw, str) or not raw.strip():
+        return ""
+    v = " ".join(raw.strip().split())
+    key = v.lower()
+    if key in ALIASES: return ALIASES[key]
+    toks = [t for t in key.replace(",", " ").split() if t]
+    if "bang" in toks: return "William Bang"
+    if "gogoel" in toks: return "William Gogoel"
+    if toks and toks[0] in ALIASES: return ALIASES[toks[0]]
+    return v
+
+def _display(n: str) -> str:
+    return DISPLAY_NAME_OVERRIDES.get(n, n)
+
+def _exclude_status_series(s: pd.Series) -> pd.Series:
+    bad = {"no show","no-show","no_show","canceled meeting","cancelled meeting","canceled","cancelled"}
+    return ~s.fillna("").str.strip().str.lower().isin(bad)
+
+def _practice_for(name: str) -> str:
+    for pa, names in PRACTICE_AREAS.items():
+        if name in names: return pa
+    return "Other"
+
+def _norm_initials(x: str) -> str:
+    # Treat 'c.w.', ' cw ', 'C W', 'cw' → 'CW'
+    return re.sub(r"[^A-Z]", "", str(x or "").upper())
+
+# Initial_Consultation: apply exclusions
+init_work = init_in.copy()
+if not init_work.empty:
+    init_work["Lead Attorney"] = init_work.get("Lead Attorney","").astype(str).map(_norm_name)
+    init_work = init_work.loc[_exclude_status_series(init_work.get("Status",""))].copy()
+
+# Discovery_Meeting: apply exclusions + remove Follow Up
+disc_work = disc_in.copy()
+if not disc_work.empty:
+    disc_work["Lead Attorney"] = disc_work.get("Lead Attorney","").astype(str).map(_norm_name)
+    ok_status = _exclude_status_series(disc_work.get("Status",""))
+    not_follow = ~disc_work.get("Sub Status","").astype(str).str.strip().str.lower().eq("follow up")
+    disc_work = disc_work.loc[ok_status & not_follow].copy()
+
+# Meetings per attorney = IC + DM
+ic_counts = (init_work["Lead Attorney"].value_counts() if "Lead Attorney" in init_work.columns else pd.Series(dtype=int))
+dm_counts = (disc_work["Lead Attorney"].value_counts() if "Lead Attorney" in disc_work.columns else pd.Series(dtype=int))
+meet = pd.concat([ic_counts.rename("IC"), dm_counts.rename("DM")], axis=1).fillna(0)
+meet["PNCs who met"] = meet["IC"] + meet["DM"]
+meet = meet.reset_index().rename(columns={"index":"Attorney"})
+
+# Ensure every configured attorney appears
+all_configured = sorted(set(sum(PRACTICE_AREAS.values(), [])))
+meet = pd.DataFrame({"Attorney": all_configured}).merge(meet, on="Attorney", how="left").fillna({"IC":0,"DM":0,"PNCs who met":0})
+
+# Retained per attorney (NCL): use initials in "Responsible Attorney" (preferred) or "Atty Initials"
+retained_flag_col = None
+for cand in ["Retained With Consult (Y/N)", "Retained with Consult (Y/N)"]:
+    if cand in ncl_in.columns:
+        retained_flag_col = cand; break
+
+def _retained_counts(ncl_slice: pd.DataFrame) -> pd.DataFrame:
+    if ncl_slice.empty or retained_flag_col is None:
+        return pd.DataFrame({"Attorney": [], "PNCs who met and retained": []})
+    flag = ncl_slice[retained_flag_col].astype(str).str.strip().str.upper()
+    kept = ncl_slice.loc[flag != "N"].copy()
+    if kept.empty:
+        return pd.DataFrame({"Attorney": [], "PNCs who met and retained": []})
+
+    # Choose initials source (Responsible Attorney preferred, else Atty Initials if present)
+    if "Responsible Attorney" in kept.columns:
+        kept["_ini"] = kept["Responsible Attorney"].map(_norm_initials)
+    elif "Atty Initials" in kept.columns:
+        kept["_ini"] = kept["Atty Initials"].map(_norm_initials)
+    else:
+        return pd.DataFrame({"Attorney": [], "PNCs who met and retained": []})
+
+    kept["_att"] = kept["_ini"].map(lambda ini: INITIALS_TO_ATTORNEY.get(ini, "Other"))
+    out = (kept["_att"]
+           .value_counts()
+           .rename("PNCs who met and retained")
+           .reset_index()
+           .rename(columns={"index":"Attorney"}))
+    return out
+
+retained = _retained_counts(ncl_in)
+
+# Merge & compute percentage (Row 3 = retained ÷ # of PNCs from first block)
+report = meet.merge(retained, on="Attorney", how="left").fillna({"PNCs who met and retained": 0})
+report["Practice Area"] = report["Attorney"].map(_practice_for)
+report["Attorney_Display"] = report["Attorney"].map(_display)
+
+denom_pncs = int(row2) if isinstance(row2, (int, float)) else 0
+report["% of PNCs who met and retained"] = report.apply(
+    lambda r: 0.0 if denom_pncs == 0 else round((r["PNCs who met and retained"] / denom_pncs) * 100.0, 2),
+    axis=1
+)
+
+# UI: one expander per practice area with Attorney dropdown (incl. ALL)
+for pa in ["Estate Planning","Estate Administration","Civil Litigation","Business transactional","Other"]:
+    sub = report.loc[report["Practice Area"] == pa].copy()
+
+    # "ALL" row = sum of attorneys in that practice area
+    all_row = pd.DataFrame([{
+        "Attorney": "__ALL__", "Attorney_Display":"ALL",
+        "PNCs who met": int(sub["PNCs who met"].sum()),
+        "PNCs who met and retained": int(sub["PNCs who met and retained"].sum()),
+        "% of PNCs who met and retained": (0.0 if denom_pncs == 0 else round((sub["PNCs who met and retained"].sum() / denom_pncs) * 100.0, 2))
+    }])
+
+    show = pd.concat([all_row, sub[[
+        "Attorney","Attorney_Display","PNCs who met","PNCs who met and retained","% of PNCs who met and retained"
+    ]]], ignore_index=True)
+
+    if show.empty:
+        continue
+
+    with st.expander(pa, expanded=False):
+        attys = ["ALL"] + [n for n in show["Attorney_Display"].tolist() if n != "ALL"]
+        pick = st.selectbox(f"{pa} — choose attorney", attys, key=f"pa_pick_{pa}")
+
+        if pick == "ALL":
+            rowx = show.iloc[0]
+            title_name = "ALL"
+        else:
+            rowx = show.loc[show["Attorney_Display"] == pick].iloc[0]
+            title_name = pick
+
+        st.markdown(f"**Conversion Report: {title_name}**")
+        three_rows = pd.DataFrame({
+            "": [
+                f"PNCs who met with {title_name}",
+                f"PNCs who met with {title_name} and retained",
+                f"% of PNCs who met with {title_name} and retained",
+            ],
+            "Value": [
+                int(rowx["PNCs who met"]),
+                int(rowx["PNCs who met and retained"]),
+                f'{float(rowx["% of PNCs who met and retained"]):.2f}%',
+            ]
+        })
+        st.dataframe(three_rows, use_container_width=True)
+
 with st.expander("Debug details (for reconciliation)", expanded=False):
     if not df_leads.empty and "Stage" in df_leads.columns and len(leads_in_range) == len(df_leads):
         st.write("Leads_PNCs — Stage (in selected period)",
