@@ -133,23 +133,14 @@ def _ws(title: str):
     from gspread.exceptions import APIError, WorksheetNotFound
 
     last_exc = None
-    # 1) Try to fetch a few times (transient 404s sometimes happen)
     for delay in (0.0, 0.6, 1.2, 2.4):
         try:
-            if delay:
-                time.sleep(delay)
+            if delay: time.sleep(delay)
             return GSHEET.worksheet(title)
-        except WorksheetNotFound as e:
-            last_exc = e
-            continue
-        except APIError as e:
-            last_exc = e
-            continue
-        except Exception as e:
+        except (WorksheetNotFound, APIError, Exception) as e:
             last_exc = e
             continue
 
-    # 2) Double-check by listing all worksheets; if present, fetch again
     try:
         titles = [w.title for w in GSHEET.worksheets()]
         if title in titles:
@@ -157,28 +148,17 @@ def _ws(title: str):
     except Exception:
         pass
 
-    # 3) Try fallbacks (old tab names) before creating
     for fb in TAB_FALLBACKS.get(title, []):
         try:
             return GSHEET.worksheet(fb)
         except Exception:
             continue
 
-    # 4) Create; if API says "already exists", just fetch
     try:
         GSHEET.add_worksheet(title=title, rows=2000, cols=40)
         return GSHEET.worksheet(title)
-    except APIError as e:
-        if "already exists" in str(e).lower():
-            try:
-                return GSHEET.worksheet(title)
-            except Exception:
-                st.error(f"Worksheet exists but can't be retrieved: {e}")
-                return None
-        # Other API error creating the sheet
-        st.error(f"Could not create worksheet '{title}': {e}")
-        return None
     except Exception as e:
+        # If it already exists, fetch; else surface an error
         try:
             return GSHEET.worksheet(title)
         except Exception:
@@ -451,7 +431,6 @@ def process_calls_csv(raw: pd.DataFrame, period_key: str) -> pd.DataFrame:
                 rename_map[actual] = canonical; used.add(actual); break
     df = raw.rename(columns=rename_map).copy()
 
-    # Combine split incoming/outgoing if present
     def norm2(s: str) -> str:
         return re.sub(r"[^a-z0-9 ]","",re.sub(r"[\s_]+"," ",s.strip().lower()))
     incoming = [c for c in raw.columns if norm2(c) in {"incoming internal","incoming external","incoming"}]
@@ -972,14 +951,28 @@ init_in = df_init.loc[init_mask].copy() if not df_init.empty else pd.DataFrame()
 disc_in = df_disc.loc[disc_mask].copy() if not df_disc.empty else pd.DataFrame()
 ncl_in  = df_ncl.loc[ncl_mask].copy()  if not df_ncl.empty  else pd.DataFrame()
 
-# Leads & PNCs — batch window overlap
-if not df_leads.empty and {"__batch_start","__batch_end"} <= set(df_leads.columns):
-    bs = pd.to_datetime(df_leads["__batch_start"], errors="coerce")
-    be = pd.to_datetime(df_leads["__batch_end"],   errors="coerce")
-    start_ts, end_ts = pd.Timestamp(start_date), pd.Timestamp(end_date)
-    leads_in_range = (bs <= end_ts) & (be >= start_ts)
-else:
-    leads_in_range = pd.Series(False, index=df_leads.index)
+# Leads & PNCs — derive from upload window columns (robust)
+def _leads_window_mask(df: pd.DataFrame, start_d: date, end_d: date) -> pd.Series:
+    if df is None or df.empty:
+        return pd.Series(False, index=pd.RangeIndex(0))
+    start_ts, end_ts = pd.Timestamp(start_d), pd.Timestamp(end_d)
+    # Candidate column name pairs for the upload window
+    candidates = [
+        ("__batch_start", "__batch_end"),
+        ("Upload Window Start", "Upload Window End"),
+    ]
+    for c0, c1 in candidates:
+        if c0 in df.columns and c1 in df.columns:
+            bs = pd.to_datetime(df[c0], errors="coerce")
+            be = pd.to_datetime(df[c1], errors="coerce")
+            return (bs <= end_ts) & (be >= start_ts)
+    # If missing, warn once and treat as out-of-range (so counts don't go wild)
+    if not st.session_state.get("warned_missing_leads_batch", False):
+        st.session_state["warned_missing_leads_batch"] = True
+        st.warning("Leads/PNCs sheet is missing upload window columns. Re-upload Leads_PNCs with the proper date range so these counts filter correctly.")
+    return pd.Series(False, index=df.index)
+
+leads_in_range = _leads_window_mask(df_leads, start_date, end_date)
 
 EXCLUDED_PNC_STAGES = {
     "Marketing/Scam/Spam (Non-Lead)","Referred Out","No Stage","New Lead",
@@ -1020,6 +1013,9 @@ row10 = int(ncl_in.shape[0])                  # total retained
 
 # ── Final rules for Scheduled/Showed (Column I and Follow Up) ──────────────────
 def _col_I_name(df: pd.DataFrame) -> Optional[str]:
+    # Prefer explicit header if present; else fall back to absolute column I.
+    if "Status" in df.columns:  # common header for this column
+        return "Status"
     return df.columns[8] if (isinstance(df, pd.DataFrame) and len(df.columns) > 8) else None
 
 def compute_sched_showed(df: pd.DataFrame, date_col: str) -> Tuple[int, int, Dict[str,int], Dict[str,int]]:
@@ -1166,7 +1162,11 @@ def _counts_by_attorney() -> pd.Series:
     ic_counts = ic_la.loc[_showed_mask(init_in)].value_counts()
     dm_counts = dm_la.loc[_showed_mask(disc_in)].value_counts()
     out = pd.concat([ic_counts, dm_counts], axis=1).fillna(0).sum(axis=1)
-    return out[out.index.astype(str).str.strip().ne("")]
+
+    # Robust index cleanup (avoid Index.astype attr errors on some pandas builds)
+    idx_str = pd.Index([("" if x is None else str(x)) for x in out.index])
+    mask = idx_str.str.strip().ne("")
+    return out[mask]
 
 met_by_atty = _counts_by_attorney() if (not init_in.empty or not disc_in.empty) else pd.Series(dtype=float)
 
