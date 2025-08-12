@@ -1,4 +1,7 @@
-# app.py
+# Create a full updated app file that preserves the user's code and applies the agreed fixes.
+# We'll name it app_updated.py so it's easy to download separately.
+
+code = r'''# app.py
 # PJI Law • Conversion and Call Report (Streamlit)
 
 import io
@@ -970,8 +973,14 @@ row2 = int(
     ].shape[0]
 ) if not df_leads.empty and "Stage" in df_leads.columns else 0
 
-# Helper to find a column by name (case-insensitive) — already defined earlier in your file
-# def _find_col(...)
+# Helper to find a column by name (case-insensitive)
+def _find_col(df: pd.DataFrame, candidates: list[str]) -> Optional[str]:
+    if df is None or df.empty: return None
+    cols = {c.lower().strip(): c for c in df.columns}
+    for cand in candidates:
+        k = cand.lower().strip()
+        if k in cols: return cols[k]
+    return None
 
 # === FIXED: IC/DM scheduled & showed ===
 # Scheduled (exclude Sub Status == 'Follow Up'); Met-with = Scheduled MINUS any non-empty value in Column I (Reason for Rescheduling)
@@ -988,7 +997,7 @@ def _scheduled_and_showed(df: pd.DataFrame, substatus_colname: Optional[str]) ->
     scheduled = int(len(scheduled_df))
 
     # Prefer the named Column I; fallback to physical 9th column (index 8)
-    reason_col = REASON_COL if (REASON_COL in scheduled_df.columns) else (scheduled_df.columns[8] if scheduled_df.shape[1] >= 9 else None)
+    reason_col = _find_col(scheduled_df, ["Reason for Rescheduling"]) or (scheduled_df.columns[8] if scheduled_df.shape[1] >= 9 else None)
     if reason_col:
         non_show_mask = scheduled_df[reason_col].astype(str).fillna("").str.strip().ne("")
     else:
@@ -1150,7 +1159,7 @@ def _counts_met_by_attorney() -> pd.Series:
             df = df.loc[~df[sub_col].astype(str).str.strip().str.lower().eq("follow up")].copy()
 
         # Column I rule (prefer named Column I, else 9th column)
-        reason_col = REASON_COL if (REASON_COL in df.columns) else (df.columns[8] if df.shape[1] >= 9 else None)
+        reason_col = _find_col(df, ["Reason for Rescheduling"]) or (df.columns[8] if df.shape[1] >= 9 else None)
         if reason_col:
             df = df.loc[df[reason_col].astype(str).fillna("").str.strip().eq("")].copy()
 
@@ -1290,3 +1299,19 @@ with st.expander("Debug details (for reconciliation)", expanded=False):
         f"Total retained={row10} ({row11}%)"
     )
 
+# ───────────────────────────────────────────────────────────────────────────────
+# Quiet logs (optional)
+# ───────────────────────────────────────────────────────────────────────────────
+with st.expander("ℹ️ Logs (tech details)", expanded=False):
+    if st.session_state["logs"]:
+        for line in st.session_state["logs"]:
+            st.code(line)
+    else:
+        st.caption("No technical logs this session.")
+'''
+
+out_path = "/mnt/data/app_updated.py"
+with open(out_path, "w", encoding="utf-8") as f:
+    f.write(code)
+
+out_path
