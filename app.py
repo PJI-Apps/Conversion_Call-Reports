@@ -1075,21 +1075,18 @@ st.subheader("Practice Area")
 
 PRACTICE_AREAS = {
     "Estate Planning": ["Connor Watkins", "Jennifer Fox", "Rebecca Megel"],
-    "Estate Administration": ["Adam Hill", "Elias Kerby", "Elizabeth Ross", "Garrett Kizer", "Kyle Grabulis", "Sarah Kravetz"],
+    "Estate Administration": [
+        "Adam Hill", "Elias Kerby", "Elizabeth Ross", "Garrett Kizer",
+        "Kyle Grabulis", "Sarah Kravetz",
+        # NEW hires:
+        "Jamie Kliem", "Carter McClain",
+    ],
     "Civil Litigation": ["Andrew Suddarth", "William Bang", "Bret Giaimo", "Hannah Supernor", "Laura Kouremetis", "Lukios Stefan", "William Gogoel"],
     "Business transactional": ["Kevin Jaros"],
 }
-# Explicit “Other” people you want tracked
+
 OTHER_ATTORNEYS = ["Robert Brown", "Justine Sennott", "Paul Abraham"]
 
-DISPLAY_NAME_OVERRIDES = {
-    "Elias Kerby": "Eli Kerby",
-    "William Bang": "Billy Bang",
-    "William Gogoel": "Will Gogoel",
-    "Andrew Suddarth": "Andy Suddarth",
-}
-
-# Initials map — includes “Other” so JS, RB, PA show up in the table
 ATTORNEY_TO_INITIALS = {
     "Connor Watkins": "CW","Jennifer Fox": "JF","Rebecca Megel": "RM",
     "Adam Hill": "AH","Elias Kerby": "EK","Elizabeth Ross": "ER",
@@ -1097,10 +1094,13 @@ ATTORNEY_TO_INITIALS = {
     "Andrew Suddarth": "AS","William Bang": "WB","Bret Giaimo": "BG",
     "Hannah Supernor": "HS","Laura Kouremetis": "LK","Lukios Stefan": "LS",
     "William Gogoel": "WG","Kevin Jaros": "KJ",
-    # Other bucket (explicit)
+    # NEW Estate Administration
+    "Jamie Kliem": "JK","Carter McClain": "CM",
+    # Explicit “Other”
     "Robert Brown": "RB","Justine Sennott": "JS","Paul Abraham": "PA",
 }
 INITIALS_TO_ATTORNEY = {v: k for k, v in ATTORNEY_TO_INITIALS.items()}
+
 
 def _display(n: str) -> str:
     return DISPLAY_NAME_OVERRIDES.get(n, n)
@@ -1157,43 +1157,53 @@ met_by_attorney = {name: int(met_raw.get(name, 0)) for name in CANON}
 
 # ---------- NCL “met & retained” (E,F,G) ----------
 def _retained_counts_from_ncl(ncl_df: pd.DataFrame) -> pd.Series:
+    """NCL-only retained: Column G in range, Column F != 'N', attribute by initials in Column E."""
     if not isinstance(ncl_df, pd.DataFrame) or ncl_df.empty:
         return pd.Series(dtype=int)
+
+    # E,F,G → Responsible Attorney (initials), Retained flag, Date
     c_init, c_flag, c_date = _col_by_idx(ncl_df, 4), _col_by_idx(ncl_df, 5), _col_by_idx(ncl_df, 6)
     if not (c_init and c_flag and c_date):
         return pd.Series(dtype=int)
 
     tmp = ncl_df.copy()
-    m = _between_dates(tmp[c_date], start_date, end_date)
-    m &= tmp[c_flag].astype(str).str.strip().str.upper().ne("N")
+    mask = _between_dates(tmp[c_date], start_date, end_date)
+    mask &= tmp[c_flag].astype(str).str.strip().str.upper().ne("N")
 
     import re
-    def _ini_to_att(s: str) -> str:
-        toks = re.findall(r"[A-Z]{2}", str(s).upper())
-        for t in toks:
-            att = INITIALS_TO_ATTORNEY.get(t)
-            if att: return att
+    def _ini_to_att(raw: str) -> str:
+        s = str(raw or "").upper()
+        # normalize to letters only for exact 2-letter check
+        exact = re.sub(r"[^A-Z]", "", s)
+        if len(exact) == 2 and exact in INITIALS_TO_ATTORNEY:
+            return INITIALS_TO_ATTORNEY[exact]
+        # otherwise, scan for any 2-letter token
+        for t in re.findall(r"[A-Z]{2}", s):
+            if t in INITIALS_TO_ATTORNEY:
+                return INITIALS_TO_ATTORNEY[t]
         return "Other"
 
-    mapped = tmp.loc[m, c_init].astype(str).map(_ini_to_att)
+    mapped = tmp.loc[mask, c_init].map(_ini_to_att)
     counts = mapped.value_counts(dropna=False)
-    # Don’t drop “Other” or names outside the practice lists; we’ll just fill zeros for missing rows later
-    return counts
 
-ret_counts = _retained_counts_from_ncl(df_ncl)
+    # Ensure every tracked attorney (practice + explicit Other) appears
+    CANON = sum(PRACTICE_AREAS.values(), []) + OTHER_ATTORNEYS
+    return pd.Series({name: int(counts.get(name, 0)) for name in CANON})
 
 # ---------- Build report ----------
+CANON = sum(PRACTICE_AREAS.values(), []) + OTHER_ATTORNEYS
+
+met_counts_raw = _met_counts_from_ic_dm(df_init, df_disc)  # your existing IC/DM function
+met_by_attorney = {name: int(met_counts_raw.get(name, 0)) for name in CANON}
+
+retained_by_attorney = _retained_counts_from_ncl(df_ncl)
+
 report = pd.DataFrame({"Attorney": CANON})
 report["PNCs who met"] = report["Attorney"].map(lambda a: met_by_attorney.get(a, 0))
-report["PNCs who met and retained"] = report["Attorney"].map(lambda a: int(ret_counts.get(a, 0)))
+report["PNCs who met and retained"] = report["Attorney"].map(lambda a: int(retained_by_attorney.get(a, 0)))
 report["Practice Area"] = report["Attorney"].map(_practice_for)
-report["Attorney_Display"] = report["Attorney"].map(_display)
+report["Attorney_Display"] = report["Attorney"].map(lambda n: DISPLAY_NAME_OVERRIDES.get(n, n))
 
-denom_pncs = int(row2) if isinstance(row2, (int, float)) else 0
-report["% of PNCs who met and retained"] = report.apply(
-    lambda r: 0.0 if denom_pncs == 0 else round((r["PNCs who met and retained"] / denom_pncs) * 100.0, 2),
-    axis=1
-)
 
 # ---------- Render ----------
 def _render_three_row_card(title_name: str, met: int, kept: int, pct: float):
