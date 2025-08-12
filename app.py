@@ -1130,93 +1130,72 @@ def _between_dates(s, start, end):
     x = x.dt.normalize()
     return x.between(pd.Timestamp(start), pd.Timestamp(end), inclusive="both")
 
-# ---------- IC/DM “met with” ----------
-def _met_counts_from_ic_dm(ic_df: pd.DataFrame, dm_df: pd.DataFrame, start_date, end_date) -> pd.Series:
+# ---------- Accurate "PNCs who met" and "PNCs who met and retained" ----------
+
+def _pnc_met_counts(ic_df: pd.DataFrame, dm_df: pd.DataFrame) -> dict:
+    """
+    Count PNCs who met with each attorney based on Initial Consultation (IC) 
+    and Discovery Meeting (DM) sheets.
+    Uses attorney FULL NAMES from column L (index 11).
+    """
     pieces = []
-    for df, date_col, att_col in [
-        (ic_df, "Initial Consultation With Pji Law", "Lead Attorney"),
-        (dm_df, "Discovery Meeting With Pji Law", "Lead Attorney")
-    ]:
-        if df is not None and not df.empty and date_col in df.columns and att_col in df.columns:
-            s = pd.to_datetime(df[date_col].map(_clean_datestr), errors="coerce")
-            mask = (s.dt.date >= start_date) & (s.dt.date <= end_date)
-            # Exclude 'Follow Up' if present
-            if "Sub Status" in df.columns:
-                mask &= ~df["Sub Status"].astype(str).str.lower().str.strip().eq("follow up")
-            # Only blank Reason for Rescheduling
-            if "Reason for Rescheduling" in df.columns:
-                mask &= df["Reason for Rescheduling"].astype(str).str.strip().eq("")
-            pieces.append(df.loc[mask, att_col].astype(str).str.strip())
+
+    if isinstance(ic_df, pd.DataFrame) and not ic_df.empty:
+        col_att = _col_by_idx(ic_df, 11)  # Column L
+        col_date = _col_by_idx(ic_df, 12) # Column M
+        if col_att and col_date:
+            m = _between_dates(ic_df[col_date], start_date, end_date)
+            pieces.append(ic_df.loc[m, col_att].astype(str).str.strip())
+
+    if isinstance(dm_df, pd.DataFrame) and not dm_df.empty:
+        col_att = _col_by_idx(dm_df, 11)  # Column L
+        col_date = _col_by_idx(dm_df, 15) # Column P
+        if col_att and col_date:
+            m = _between_dates(dm_df[col_date], start_date, end_date)
+            pieces.append(dm_df.loc[m, col_att].astype(str).str.strip())
+
     if not pieces:
-        return pd.Series(dtype=int)
+        return {}
+
     met_series = pd.concat(pieces, ignore_index=True)
     met_series = met_series[met_series.ne("")]
-    return met_series.value_counts(dropna=False)
+    return met_series.value_counts(dropna=False).to_dict()
 
-# Build full roster = practice areas + explicit Other
-CANON = sum(PRACTICE_AREAS.values(), []) + OTHER_ATTORNEYS
 
-met_counts_raw = _met_counts_from_ic_dm(df_init, df_disc, start_date, end_date)
-met_by_attorney = {name: int(met_counts_raw.get(name, 0)) for name in CANON}
-# ---------- NCL “met & retained” (E,F,G) ----------
-def _retained_counts_from_ncl(ncl_df: pd.DataFrame) -> pd.Series:
-    """NCL-only retained: Column G in range, Column F != 'N', attribute by initials in Column E."""
+def _pnc_retained_counts(ncl_df: pd.DataFrame) -> dict:
+    """
+    Count PNCs who met and retained based on NCL sheet.
+    Uses initials in Column E (index 4) → maps to full names.
+    Column F (index 5) must not be 'N'.
+    Column G (index 6) = date retained.
+    """
     if not isinstance(ncl_df, pd.DataFrame) or ncl_df.empty:
-        return pd.Series(dtype=int)
+        return {}
 
-    # E,F,G → Responsible Attorney (initials), Retained flag, Date
-    c_init, c_flag, c_date = _col_by_idx(ncl_df, 4), _col_by_idx(ncl_df, 5), _col_by_idx(ncl_df, 6)
-    if not (c_init and c_flag and c_date):
-        return pd.Series(dtype=int)
+    col_init = _col_by_idx(ncl_df, 4)
+    col_flag = _col_by_idx(ncl_df, 5)
+    col_date = _col_by_idx(ncl_df, 6)
+
+    if not (col_init and col_flag and col_date):
+        return {}
 
     tmp = ncl_df.copy()
-    mask = _between_dates(tmp[c_date], start_date, end_date)
-    mask &= tmp[c_flag].astype(str).str.strip().str.upper().ne("N")
+    m = _between_dates(tmp[col_date], start_date, end_date)
+    m &= tmp[col_flag].astype(str).str.strip().str.upper().ne("N")
 
-    import re
-    def _ini_to_att(raw: str) -> str:
-        s = str(raw or "").upper()
-        # normalize to letters only for exact 2-letter check
-        exact = re.sub(r"[^A-Z]", "", s)
-        if len(exact) == 2 and exact in INITIALS_TO_ATTORNEY:
-            return INITIALS_TO_ATTORNEY[exact]
-        # otherwise, scan for any 2-letter token
-        for t in re.findall(r"[A-Z]{2}", s):
-            if t in INITIALS_TO_ATTORNEY:
-                return INITIALS_TO_ATTORNEY[t]
-        return "Other"
+    def _ini_to_name(raw: str) -> str:
+        s = str(raw or "").upper().strip()
+        return INITIALS_TO_ATTORNEY.get(s, "Other")
 
-    mapped = tmp.loc[mask, c_init].map(_ini_to_att)
-    counts = mapped.value_counts(dropna=False)
+    mapped_names = tmp.loc[m, col_init].map(_ini_to_name)
+    counts = mapped_names.value_counts(dropna=False).to_dict()
+    return counts
 
-    # Ensure every tracked attorney (practice + explicit Other) appears
-    CANON = sum(PRACTICE_AREAS.values(), []) + OTHER_ATTORNEYS
-    return pd.Series({name: int(counts.get(name, 0)) for name in CANON})
 
-def _display_safe(n: str) -> str:
-    return globals().get("DISPLAY_NAME_OVERRIDES", {}).get(n, n)
+# Build counts
+met_by_attorney = {name: int(_pnc_met_counts(df_init, df_disc).get(name, 0)) for name in CANON}
+retained_by_attorney = {name: int(_pnc_retained_counts(df_ncl).get(name, 0)) for name in CANON}
 
-DISPLAY_NAME_OVERRIDES = {
-    "Elias Kerby": "Eli Kerby",
-    "William Bang": "Billy Bang",
-    "William Gogoel": "Will Gogoel",
-    "Andrew Suddarth": "Andy Suddarth",
-}
-
-# ---------- Build report ----------
-# Build the full roster (practice areas + explicit Other), de-duplicated in order
-CANON = list(dict.fromkeys(sum(PRACTICE_AREAS.values(), []) + OTHER_ATTORNEYS))
-
-met_counts_raw = _met_counts_raw = _met_counts_from_ic_dm(df_init, df_disc, start_date, end_date)  # IC/DM "met with" (exact full names)
-met_by_attorney = {name: int(met_counts_raw.get(name, 0)) for name in CANON}
-
-# NCL retained (initials → full names)
-retained_by_attorney = _retained_counts_from_ncl(df_ncl)
-retained_by_attorney = {} if retained_by_attorney is None else retained_by_attorney.to_dict()
-
-# Safe display-name mapper (avoids NameError)
-def _display_safe(n: str) -> str:
-    return globals().get("DISPLAY_NAME_OVERRIDES", {}).get(n, n)
 
 report = pd.DataFrame({"Attorney": CANON})
 report["PNCs who met"] = report["Attorney"].map(lambda a: int(met_by_attorney.get(a, 0)))
