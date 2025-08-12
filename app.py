@@ -1279,40 +1279,51 @@ def _is_blank(series: pd.Series) -> pd.Series:
 
 # ---------- Robust counters (operate on RAW sheets; do their own date filtering) ----------
 def _met_counts_from_ic_dm_fuzzy(ic_df: pd.DataFrame, dm_df: pd.DataFrame, sd, ed) -> dict:
-    """PNCs who met with {Attorney} from IC+DM: fuzzy headers, include in-range; exclude Follow Up + non-blank Reason."""
     buckets = []
 
-    # IC
+    # ---- IC ----
     if isinstance(ic_df, pd.DataFrame) and not ic_df.empty:
-        att  = _col_fuzzy(ic_df, ["lead","attorney"])
-        date = _col_fuzzy(ic_df, ["initial","consultation"])
-        sub  = _col_fuzzy(ic_df, ["sub","status"])
-        rsn  = _col_fuzzy(ic_df, ["reason","resched"])
+        att  = _pick_col_strict(ic_df, ["lead","attorney"])
+        date = _pick_col_strict(
+            ic_df,
+            must_have_tokens=["initial","consultation"],
+            avoid_tokens=["resched","reschedule","rescheduled"],  # never use rescheduled for IC date
+            prefer_exact=["initial consultation with pji law"]
+        )
+        sub  = _pick_col_strict(ic_df, ["sub","status"])
+        rsn  = _pick_col_strict(ic_df, ["reason","resched"])
         if att and date:
             t = ic_df.copy()
             m = _between_inclusive(t[date], sd, ed)
-            if sub is not None: m &= ~t[sub].astype(str).str.strip().str.lower().eq("follow up")
-            if rsn is not None: m &= _is_blank(t[rsn])
+            if sub: m &= ~t[sub].astype(str).str.strip().str.lower().eq("follow up")
+            if rsn: m &= _is_blank(t[rsn])
             buckets.append(t.loc[m, att].astype(str).str.strip())
 
-    # DM
+    # ---- DM ----
     if isinstance(dm_df, pd.DataFrame) and not dm_df.empty:
-        att  = _col_fuzzy(dm_df, ["lead","attorney"])
-        date = _col_fuzzy(dm_df, ["discovery","meeting"])
-        sub  = _col_fuzzy(dm_df, ["sub","status"])
-        rsn  = _col_fuzzy(dm_df, ["reason","resched"])
+        att  = _pick_col_strict(dm_df, ["lead","attorney"])
+        date = _pick_col_strict(
+            dm_df,
+            must_have_tokens=["discovery","meeting"],
+            avoid_tokens=["resched","reschedule","rescheduled"],  # <- **key fix**: avoid rescheduled column
+            prefer_exact=["discovery meeting with pji law"]
+        )
+        sub  = _pick_col_strict(dm_df, ["sub","status"])
+        rsn  = _pick_col_strict(dm_df, ["reason","resched"])
         if att and date:
             t = dm_df.copy()
             m = _between_inclusive(t[date], sd, ed)
-            if sub is not None: m &= ~t[sub].astype(str).str.strip().str.lower().eq("follow up")
-            if rsn is not None: m &= _is_blank(t[rsn])
+            if sub: m &= ~t[sub].astype(str).str.strip().str.lower().eq("follow up")
+            if rsn: m &= _is_blank(t[rsn])
             buckets.append(t.loc[m, att].astype(str).str.strip())
 
     if not buckets:
         return {}
+
     met_series = pd.concat(buckets, ignore_index=True)
     met_series = met_series[met_series.ne("")]
     return met_series.value_counts(dropna=False).to_dict()
+
 
 def _retained_counts_from_ncl_fuzzy(ncl_df: pd.DataFrame, sd, ed) -> dict:
     """PNCs who met & retained from NCL: fuzzy headers; F != 'N'; G in range; initials → full names (unknown→Other)."""
@@ -1414,23 +1425,52 @@ def _between(series: pd.Series, sd, ed) -> pd.Series:
     x = _to_ts(series)
     return (x >= pd.Timestamp(sd)) & (x <= pd.Timestamp(ed))
 
-def _col_fuzzy(df: pd.DataFrame, patterns: list[str]) -> str | None:
-    if df is None or df.empty: return None
-    def norm(s: str) -> str:
-        s = str(s).lower().strip()
-        s = re.sub(r"\s+"," ", s); s = re.sub(r"[^a-z0-9 ]","", s)
-        return s
-    tgt = [norm(p) for p in patterns if str(p).strip()]
-    cand = {c: norm(c) for c in df.columns}
-    # prefer full all-token match; else best partial containing any token
-    for c, n in cand.items():
-        if all(tok in n for tok in tgt): return c
-    # partial fallback
-    best = None
-    for c, n in cand.items():
-        if any(tok in n for tok in tgt):
-            best = best or c
-    return best
+import re
+
+def _norm_header(s: str) -> str:
+    s = str(s).lower().strip()
+    s = re.sub(r"[\s_]+", " ", s)
+    s = re.sub(r"[^a-z0-9 ]", "", s)
+    return s
+
+def _pick_col_strict(df: pd.DataFrame, must_have_tokens: list[str], avoid_tokens: list[str] | None = None,
+                     prefer_exact: list[str] | None = None) -> str | None:
+    """
+    Choose a column whose normalized name:
+      • contains ALL tokens in must_have_tokens
+      • and (if avoid_tokens given) does NOT contain any avoid token
+      • and (if prefer_exact given) prefers exact normalized matches
+    If multiple match, returns the first by strength (prefer_exact > shortest name).
+    """
+    if df is None or df.empty:
+        return None
+    avoid_tokens = [ _norm_header(t) for t in (avoid_tokens or []) if str(t).strip() ]
+    must = [ _norm_header(t) for t in (must_have_tokens or []) if str(t).strip() ]
+    cols = list(df.columns)
+    norms = { c: _norm_header(c) for c in cols }
+
+    # candidates must include ALL tokens
+    cands = [ c for c in cols if all(tok in norms[c] for tok in must) ]
+    if not cands:
+        return None
+
+    # drop any candidate that contains avoid tokens
+    if avoid_tokens:
+        cands = [ c for c in cands if not any(av in norms[c] for av in avoid_tokens) ] or cands
+
+    # prefer exact matches if requested
+    if prefer_exact:
+        prefer_exact_norms = [ _norm_header(x) for x in prefer_exact ]
+        exacts = [ c for c in cands if norms[c] in prefer_exact_norms ]
+        if exacts:
+            # if multiple exacts, pick shortest (cleanest) header
+            exacts.sort(key=lambda c: len(norms[c]))
+            return exacts[0]
+
+    # otherwise pick the shortest normalized candidate (tends to be the canonical one)
+    cands.sort(key=lambda c: len(norms[c]))
+    return cands[0]
+
 
 # 3) strict index-based counter (IC: L/M/G/I; DM: L/P/G/I)
 def _count_by_index(ic_df, dm_df, sd, ed):
