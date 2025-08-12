@@ -1177,15 +1177,27 @@ def _counts_met_by_attorney() -> pd.Series:
 met_by_atty = _counts_met_by_attorney() if (not init_in.empty or not disc_in.empty) else pd.Series(dtype=int)
 
 # Retained per attorney (NCL) using Responsible Attorney initials only
+
+# Retained attribution: map "retained" back to the *Lead Attorney who MET* (IC/DM),
+# not the NCL "Responsible Attorney" initials, whenever we can. Fallback to initials.
+
+# Retained per attorney — NCL ONLY (per your spec)
+# Use Responsible Attorney initials (Column E) and the NCL date (Column G) already filtered into `ncl_in`.
 retained_flag_col = ncl_flag_col
 
-def _retained_counts(ncl_slice: pd.DataFrame) -> pd.DataFrame:
+def _retained_counts_ncl_only(ncl_slice: pd.DataFrame) -> pd.DataFrame:
     schema = ["Attorney", "PNCs who met and retained"]
     if ncl_slice is None or ncl_slice.empty or retained_flag_col is None:
         return pd.DataFrame(columns=schema)
-    if "Responsible Attorney" not in ncl_slice.columns:
+
+    if "Responsible Attorney" in ncl_slice.columns:
+        ra_col = "Responsible Attorney"
+    elif ncl_slice.shape[1] >= 5:
+        ra_col = ncl_slice.columns[4]  # Column E fallback
+    else:
         return pd.DataFrame(columns=schema)
 
+    # Keep only retained-after-consult (anything not 'N')
     flag = ncl_slice[retained_flag_col].astype(str).str.strip().str.upper()
     kept = ncl_slice.loc[flag != "N"].copy()
     if kept.empty:
@@ -1193,26 +1205,28 @@ def _retained_counts(ncl_slice: pd.DataFrame) -> pd.DataFrame:
 
     def _ini_to_attorney(raw: str) -> str:
         s = str(raw or "").upper()
-        tokens = re.findall(r"[A-Z]{2}", s)
-        for t in tokens:
+        toks = re.findall(r"[A-Z]{2}", s)
+        for t in toks:
             att = INITIALS_TO_ATTORNEY.get(t)
             if att:
                 return att
         return "Other"
 
-    kept["_att"] = kept["Responsible Attorney"].map(_ini_to_attorney)
+    kept["_att"] = kept[ra_col].map(_ini_to_attorney)
     vc = kept["_att"].value_counts(dropna=False)
     out = vc.reset_index()
-    if out.shape[1] >= 2:
-        out.columns = ["Attorney", "PNCs who met and retained"]
-    else:
-        return pd.DataFrame(columns=schema)
-
+    out.columns = ["Attorney", "PNCs who met and retained"]
     out["Attorney"] = out["Attorney"].astype(str)
     out["PNCs who met and retained"] = pd.to_numeric(out["PNCs who met and retained"], errors="coerce").fillna(0).astype(int)
     return out
 
-retained = _retained_counts(ncl_in)
+retained = _retained_counts_ncl_only(ncl_in)
+if "Attorney" not in retained.columns:
+    retained = pd.DataFrame({"Attorney": [], "PNCs who met and retained": []})
+
+if "Attorney" not in retained.columns:
+    retained = pd.DataFrame({"Attorney": [], "PNCs who met and retained": []})
+
 if "Attorney" not in retained.columns:
     retained = pd.DataFrame({"Attorney": [], "PNCs who met and retained": []})
 
