@@ -1073,7 +1073,7 @@ st.markdown(html_table, unsafe_allow_html=True)
 # ───────────────────────────────────────────────────────────────────────────────
 st.subheader("Practice Area")
 
-# Your canonical mappings (keep as-is; include display overrides)
+# Canonical groups & display overrides (your lists)
 PRACTICE_AREAS = {
     "Estate Planning": ["Connor Watkins", "Jennifer Fox", "Rebecca Megel"],
     "Estate Administration": ["Adam Hill", "Elias Kerby", "Elizabeth Ross", "Garrett Kizer", "Kyle Grabulis", "Sarah Kravetz"],
@@ -1093,7 +1093,7 @@ ATTORNEY_TO_INITIALS = {
     "Andrew Suddarth": "AS","William Bang": "WB","Bret Giaimo": "BG",
     "Hannah Supernor": "HS","Laura Kouremetis": "LK","Lukios Stefan": "LS",
     "William Gogoel": "WG","Kevin Jaros": "KJ",
-    # “Other” bucket examples (kept in case they appear)
+    # Keep “Other” initials in case they appear in NCL
     "Robert Brown": "RB","Justine Sennott": "JS","Paul Abraham": "PA",
 }
 INITIALS_TO_ATTORNEY = {v: k for k, v in ATTORNEY_TO_INITIALS.items()}
@@ -1107,172 +1107,102 @@ def _practice_for(name: str) -> str:
             return pa
     return "Other"
 
-# --- helpers to work by absolute column positions (A=0, ..., L=11, M=12, P=15)
+# Helper: safe column-by-index (A=0,…, L=11, M=12, P=15)
 def _col_by_idx(df: pd.DataFrame, idx: int) -> str | None:
-    return df.columns[idx] if (df is not None and not df.empty and idx < df.shape[1]) else None
+    return df.columns[idx] if (isinstance(df, pd.DataFrame) and not df.empty and idx < df.shape[1]) else None
 
+# Robust date-range mask (all Timestamps; no .dt.date comparisons)
 def _between_dates(s, start, end):
-    # Normalize everything to midnight pandas Timestamps and compare
     x = pd.to_datetime(s, errors="coerce")
-    sd = pd.Timestamp(start)
-    ed = pd.Timestamp(end)
-    # Drop tz if present, then normalize to date (00:00:00)
-    try:
-        x = x.dt.tz_localize(None)
-    except Exception:
-        pass
+    try: x = x.dt.tz_localize(None)
+    except Exception: pass
     x = x.dt.normalize()
-    return x.between(sd, ed, inclusive="both")
+    return x.between(pd.Timestamp(start), pd.Timestamp(end), inclusive="both")
 
+# ---------- PNCs who met with {Attorney} (IC + DM) ----------
+def _met_counts_from_ic_dm(ic_df: pd.DataFrame, dm_df: pd.DataFrame) -> pd.Series:
+    pieces = []
 
-# ============== PNCs who met with {Attorney} (IC + DM), per your rules ==========
-def _met_counts_from_ic_dm(df_ic: pd.DataFrame, df_dm: pd.DataFrame) -> pd.Series:
-    parts = []
+    # Initial_Consultation: L (attorney), M (date), exclude I non-blank, exclude G == Follow Up
+    if isinstance(ic_df, pd.DataFrame) and not ic_df.empty:
+        c_att, c_date, c_reason, c_sub = _col_by_idx(ic_df, 11), _col_by_idx(ic_df, 12), _col_by_idx(ic_df, 8), _col_by_idx(ic_df, 6)
+        if c_att and c_date:
+            tmp = ic_df.copy()
+            mask = _between_dates(tmp[c_date], start_date, end_date)
+            if c_sub:    mask &= ~tmp[c_sub].astype(str).str.strip().str.lower().eq("follow up")
+            if c_reason: mask &= tmp[c_reason].astype(str).fillna("").str.strip().eq("")
+            vals = tmp.loc[mask, c_att].astype(str).str.strip()
+            pieces.append(vals)
 
-    # Initial_Consultation
-    if df_ic is not None and not df_ic.empty:
-        col_att = _col_by_idx(df_ic, 11)  # L
-        col_date = _col_by_idx(df_ic, 12) # M
-        col_reason = _col_by_idx(df_ic, 8) # I
-        col_sub = _col_by_idx(df_ic, 6)    # G
-        if col_att and col_date:
-            tmp = df_ic.copy()
-            # date range
-            m = _between_dates(tmp[col_date], start_date, end_date)
-            if col_sub:    m &= ~tmp[col_sub].astype(str).str.strip().str.lower().eq("follow up")
-            if col_reason: m &= tmp[col_reason].astype(str).fillna("").str.strip().eq("")
-            vc = tmp.loc[m, col_att].astype(str).str.strip()
-            parts.append(vc)
+    # Discovery_Meeting: L (attorney), P (date), exclude I non-blank, exclude G == Follow Up
+    if isinstance(dm_df, pd.DataFrame) and not dm_df.empty:
+        c_att, c_date, c_reason, c_sub = _col_by_idx(dm_df, 11), _col_by_idx(dm_df, 15), _col_by_idx(dm_df, 8), _col_by_idx(dm_df, 6)
+        if c_att and c_date:
+            tmp = dm_df.copy()
+            mask = _between_dates(tmp[c_date], start_date, end_date)
+            if c_sub:    mask &= ~tmp[c_sub].astype(str).str.strip().str.lower().eq("follow up")
+            if c_reason: mask &= tmp[c_reason].astype(str).fillna("").str.strip().eq("")
+            vals = tmp.loc[mask, c_att].astype(str).str.strip()
+            pieces.append(vals)
 
-    # Discovery_Meeting
-    if df_dm is not None and not df_dm.empty:
-        col_att = _col_by_idx(df_dm, 11)  # L
-        col_date = _col_by_idx(df_dm, 15) # P
-        col_reason = _col_by_idx(df_dm, 8) # I
-        col_sub = _col_by_idx(df_dm, 6)    # G
-        if col_att and col_date:
-            tmp = df_dm.copy()
-            m = _between_dates(tmp[col_date], start_date, end_date)
-            if col_sub:    m &= ~tmp[col_sub].astype(str).str.strip().str.lower().eq("follow up")
-            if col_reason: m &= tmp[col_reason].astype(str).fillna("").str.strip().eq("")
-            vc = tmp.loc[m, col_att].astype(str).str.strip()
-            parts.append(vc)
-
-    if not parts:
+    if not pieces:
         return pd.Series(dtype=int)
 
-    # combine and count by exact attorney string (before display overrides)
-    met_series = pd.concat(parts, ignore_index=True)
-    met_counts = met_series[met_series.ne("")].value_counts(dropna=False)
-    # normalize to our canonical keys (exact match only; unknowns go to "Other" later)
-    return met_counts
+    met_series = pd.concat(pieces, ignore_index=True)
+    met_series = met_series[met_series.ne("")]  # drop blanks
+    return met_series.value_counts(dropna=False)
 
-# Combine IC+DM "met" and normalize attorney names to canonical keys
 met_counts_raw = _met_counts_from_ic_dm(df_init, df_disc)
 
-# Robust normalization: use your alias logic by last/first name tokens
-# (this mirrors the behavior you asked for earlier)
-NAME_CANON = set(ATTORNEY_TO_INITIALS.keys())
+# Only use exact full names (as they appear in data). Map unknown names into "Other" later.
+canonical_names = list(ATTORNEY_TO_INITIALS.keys())
+met_by_attorney = {name: int(met_counts_raw.get(name, 0)) for name in canonical_names}
 
-# Map common last names directly to canonical
-LASTNAME_MAP = {
-    "watkins":"Connor Watkins","fox":"Jennifer Fox","megel":"Rebecca Megel",
-    "hill":"Adam Hill","kerby":"Elias Kerby","ross":"Elizabeth Ross",
-    "kizer":"Garrett Kizer","grabulis":"Kyle Grabulis","kravetz":"Sarah Kravetz",
-    "suddarth":"Andrew Suddarth","bang":"William Bang","giaimo":"Bret Giaimo",
-    "supernor":"Hannah Supernor","kouremetis":"Laura Kouremetis","stefan":"Lukios Stefan",
-    "gogoel":"William Gogoel","jaros":"Kevin Jaros",
-}
-
-# Light aliasing for first names/nicknames you specified
-FIRSTNAME_MAP = {
-    "eli":"Elias Kerby","andrew":"Andrew Suddarth","andy":"Andrew Suddarth",
-    "billy":"William Bang","will":"William Gogoel",
-    "hannah":"Hannah Supernor","laura":"Laura Kouremetis","kevin":"Kevin Jaros",
-    "connor":"Connor Watkins","jennifer":"Jennifer Fox","jen":"Jennifer Fox",
-    "rebecca":"Rebecca Megel","adam":"Adam Hill","elizabeth":"Elizabeth Ross",
-    "garrett":"Garrett Kizer","kyle":"Kyle Grabulis","sarah":"Sarah Kravetz",
-    "bret":"Bret Giaimo","lukios":"Lukios Stefan",
-}
-
-def _canon_from_raw(raw: str) -> str:
-    s = str(raw or "").strip()
-    if not s:
-        return "Other"
-    # exact
-    if s in NAME_CANON:
-        return s
-    sl = s.lower()
-    toks = [t for t in re.split(r"[,\s]+", sl) if t]
-    # last-name match (most reliable)
-    for t in toks[::-1]:  # check from end
-        if t in LASTNAME_MAP:
-            return LASTNAME_MAP[t]
-    # first-name / nickname match
-    for t in toks:
-        if t in FIRSTNAME_MAP:
-            return FIRSTNAME_MAP[t]
-    return "Other"
-
-# Normalize each raw name to a canonical key and sum
-met_by_attorney = {}
-for raw_name, cnt in met_counts_raw.items():
-    key = _canon_from_raw(raw_name)
-    met_by_attorney[key] = met_by_attorney.get(key, 0) + int(cnt)
-
-
-# ============== PNCs who met with {Attorney} and retained (NCL only) ============
+# ---------- PNCs who met with {Attorney} and retained (NCL ONLY) ----------
 def _retained_counts_from_ncl(ncl_df: pd.DataFrame) -> pd.Series:
-    if ncl_df is None or ncl_df.empty:
+    if not isinstance(ncl_df, pd.DataFrame) or ncl_df.empty:
         return pd.Series(dtype=int)
 
-    col_init = _col_by_idx(ncl_df, 4)  # E: Responsible Attorney (initials)
-    col_flag = _col_by_idx(ncl_df, 5)  # F: Retained With Consult (Y/N)
-    col_date = _col_by_idx(ncl_df, 6)  # G: Date (both CLA + full payment)
-
-    if not (col_init and col_flag and col_date):
+    c_init, c_flag, c_date = _col_by_idx(ncl_df, 4), _col_by_idx(ncl_df, 5), _col_by_idx(ncl_df, 6)  # E,F,G
+    if not (c_init and c_flag and c_date):
         return pd.Series(dtype=int)
 
     tmp = ncl_df.copy()
-    m = _between_dates(tmp[col_date], start_date, end_date)
-    m &= tmp[col_flag].astype(str).str.strip().str.upper().ne("N")
+    mask = _between_dates(tmp[c_date], start_date, end_date)
+    mask &= tmp[c_flag].astype(str).str.strip().str.upper().ne("N")
 
-    kept = tmp.loc[m, col_init].astype(str).fillna("")
-    # map first two-letter token to attorney via INITIALS_TO_ATTORNEY
-    def _map_ini_to_att(s: str) -> str:
+    initials = tmp.loc[mask, c_init].astype(str).fillna("")
+
+    # map first two-letter token to full attorney name; else "Other"
+    def _ini_to_att(s: str) -> str:
         tokens = re.findall(r"[A-Z]{2}", s.upper())
         for t in tokens:
-            if t in INITIALS_TO_ATTORNEY:
-                return INITIALS_TO_ATTORNEY[t]
+            att = INITIALS_TO_ATTORNEY.get(t)
+            if att:
+                return att
         return "Other"
 
-    mapped = kept.map(_map_ini_to_att)
-    return mapped.value_counts(dropna=False)
+    mapped = initials.map(_ini_to_att)
+    counts = mapped.value_counts(dropna=False)
+    # ensure all canonical keys exist (fill 0 if missing)
+    return pd.Series({name: int(counts.get(name, 0)) for name in canonical_names})
 
-retained_by_attorney_series = _retained_counts_from_ncl(df_ncl)
-retained_by_attorney = {k: int(v) for k, v in retained_by_attorney_series.items()}
+retained_by_attorney = _retained_counts_from_ncl(df_ncl)
 
-# ============== Build report rows =============================================
-all_attorneys_for_report = list(ATTORNEY_TO_INITIALS.keys())
-report = pd.DataFrame({"Attorney": all_attorneys_for_report})
-
-# fill “met” (unknown raw names get counted under “Other” section; report only lists canonical attorneys)
-report["PNCs who met"] = report["Attorney"].map(lambda a: int(met_by_attorney.get(a, 0)))
-
-# fill “met and retained” from NCL initials mapping (already canonicalized)
+# ---------- Build report ----------
+report = pd.DataFrame({"Attorney": canonical_names})
+report["PNCs who met"] = report["Attorney"].map(lambda a: met_by_attorney.get(a, 0))
 report["PNCs who met and retained"] = report["Attorney"].map(lambda a: int(retained_by_attorney.get(a, 0)))
-
 report["Practice Area"] = report["Attorney"].map(_practice_for)
 report["Attorney_Display"] = report["Attorney"].map(_display)
 
-# % calc uses PNCs in selected period (row2 already computed)
 denom_pncs = int(row2) if isinstance(row2, (int, float)) else 0
 report["% of PNCs who met and retained"] = report.apply(
     lambda r: 0.0 if denom_pncs == 0 else round((r["PNCs who met and retained"] / denom_pncs) * 100.0, 2),
     axis=1
 )
 
-# Mini-table renderer
+# ---------- Render ----------
 def _render_three_row_card(title_name: str, met: int, kept: int, pct: float):
     rows = [
         (f"PNCs who met with {title_name}", f"{int(met)}"),
@@ -1296,18 +1226,15 @@ def _render_three_row_card(title_name: str, met: int, kept: int, pct: float):
 """
     st.markdown(html, unsafe_allow_html=True)
 
-# Render per practice area with expander + per-attorney picker
 for pa in ["Estate Planning","Estate Administration","Civil Litigation","Business transactional","Other"]:
     sub = report.loc[report["Practice Area"] == pa].copy()
-
-    met_sum = int(sub["PNCs who met"].sum())
+    met_sum  = int(sub["PNCs who met"].sum())
     kept_sum = int(sub["PNCs who met and retained"].sum())
-    pct_sum = (0.0 if denom_pncs == 0 else round((kept_sum / denom_pncs) * 100.0, 2))
+    pct_sum  = 0.0 if denom_pncs == 0 else round((kept_sum / denom_pncs) * 100.0, 2)
 
     with st.expander(pa, expanded=False):
-        attys = ["ALL"] + [n for n in sub["Attorney_Display"].tolist()]
+        attys = ["ALL"] + sub["Attorney_Display"].tolist()
         pick = st.selectbox(f"{pa} — choose attorney", attys, key=f"pa_pick_{pa.replace(' ','_')}")
-
         if pick == "ALL":
             _render_three_row_card("ALL", met_sum, kept_sum, pct_sum)
         else:
