@@ -1231,6 +1231,52 @@ INITIALS_TO_ATTORNEY = {
     "RB":"Robert Brown","JS":"Justine Sennott","PA":"Paul Abraham",
 }
 
+# --- REQUIRED DATETIME + BLANK HELPERS (must exist before _met_counts_from_ic_dm_fuzzy) ---
+import re
+
+_TZ_RE = re.compile(r"\s+(ET|EDT|EST|CT|CDT|CST|MT|MDT|MST|PT|PDT)\b", flags=re.I)
+
+def _clean_dt_text(x: str) -> str:
+    if x is None:
+        return ""
+    s = str(x).strip()
+    s = s.replace("–", "-").replace(",", " ")
+    s = re.sub(r"\s+at\s+", " ", s, flags=re.I)         # " at " → space
+    s = _TZ_RE.sub("", s)                               # drop trailing timezone token
+    s = re.sub(r"(\d)(am|pm)\b", r"\1 \2", s, flags=re.I)  # "12:45pm" → "12:45 pm"
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
+def _to_ts(series: pd.Series) -> pd.Series:
+    s = series.astype(str).map(_clean_dt_text)
+    x = pd.to_datetime(s, errors="coerce", infer_datetime_format=True)
+    # try a few explicit formats for stubborn strings
+    if getattr(x, "isna", lambda: False)().any():
+        y = x.copy()
+        for fmt in ("%m/%d/%Y %I:%M %p", "%m/%d/%Y %H:%M", "%Y-%m-%d %H:%M", "%m/%d/%Y"):
+            mask = y.isna()
+            if not mask.any():
+                break
+            try:
+                y.loc[mask] = pd.to_datetime(s.loc[mask], format=fmt, errors="coerce")
+            except Exception:
+                pass
+        x = y
+    try:
+        x = x.dt.tz_localize(None)
+    except Exception:
+        pass
+    return x
+
+def _between_inclusive(series: pd.Series, sd, ed) -> pd.Series:
+    x = _to_ts(series)
+    return (x >= pd.Timestamp(sd)) & (x <= pd.Timestamp(ed))
+
+def _is_blank(series: pd.Series) -> pd.Series:
+    s = series.astype(str)
+    return series.isna() | (s.str.strip() == "") | (s.str.lower().isin(["nan","none","na","null"]))
+
+
 # ---------- Robust counters (operate on RAW sheets; do their own date filtering) ----------
 def _met_counts_from_ic_dm_fuzzy(ic_df: pd.DataFrame, dm_df: pd.DataFrame, sd, ed) -> dict:
     """PNCs who met with {Attorney} from IC+DM: fuzzy headers, include in-range; exclude Follow Up + non-blank Reason."""
