@@ -126,39 +126,29 @@ def _gsheet_client():
 GC, GSHEET = _gsheet_client()
 
 def _ws(title: str):
-    """Robust worksheet getter/creator with retries & graceful 'already exists' handling."""
-    if GSHEET is None:
-        return None
-    import time
+    """Safe worksheet getter/creator."""
+    if GSHEET is None: return None
+    import gspread
     from gspread.exceptions import APIError, WorksheetNotFound
-
-    last_exc = None
-    for delay in (0.0, 0.6, 1.2, 2.4):
+    for delay in (0.0, 0.8, 1.6):
         try:
-            if delay: time.sleep(delay)
+            if delay: import time; time.sleep(delay)
             return GSHEET.worksheet(title)
-        except (WorksheetNotFound, APIError, Exception) as e:
-            last_exc = e
+        except WorksheetNotFound:
+            break
+        except APIError:
             continue
-
-    try:
-        titles = [w.title for w in GSHEET.worksheets()]
-        if title in titles:
-            return GSHEET.worksheet(title)
-    except Exception:
-        pass
-
+        except Exception:
+            continue
     for fb in TAB_FALLBACKS.get(title, []):
         try:
             return GSHEET.worksheet(fb)
         except Exception:
             continue
-
     try:
         GSHEET.add_worksheet(title=title, rows=2000, cols=40)
         return GSHEET.worksheet(title)
     except Exception as e:
-        # If it already exists, fetch; else surface an error
         try:
             return GSHEET.worksheet(title)
         except Exception:
@@ -189,7 +179,7 @@ def _read_ws_cached(sheet_url: str, tab_title: str, ver: int) -> pd.DataFrame:
     df = df.loc[:, ~df.columns.str.contains("^Unnamed")]
     for c in df.columns:
         cl = c.lower()
-        if "date" in cl or "with pji law" in cl or "batch" in cl:
+        if "date" in cl or "with pji law" in cl or "batch" in cl:  # include our batch columns
             df[c] = pd.to_datetime(df[c].map(_clean_datestr), errors="coerce")
     return df.dropna(how="all").fillna("")
 
@@ -267,12 +257,33 @@ def render_admin_sidebar():
         def _purge_month(logical_key: str, year: int, month: int) -> tuple[bool, int]:
             df = _read_ws_by_name(logical_key)
             if df.empty: return True, 0
+
+            # Calls: Month-Year key
             if logical_key == "CALLS":
                 mkey = f"{year}-{month:02d}"
                 before = len(df)
                 df2 = df.loc[df["Month-Year"].astype(str).str.strip() != mkey].copy()
                 ok = _write_ws_by_name(logical_key, df2)
                 return ok, before - len(df2)
+
+            # Leads: use __batch_start/__batch_end overlap with selected month
+            if logical_key == "LEADS":
+                if {"__batch_start","__batch_end"} <= set(df.columns):
+                    m_start = pd.Timestamp(year=year, month=month, day=1)
+                    last_day = monthrange(year, month)[1]
+                    m_end   = pd.Timestamp(year=year, month=month, day=last_day)
+                    bs = pd.to_datetime(df["__batch_start"], errors="coerce")
+                    be = pd.to_datetime(df["__batch_end"], errors="coerce")
+                    # keep rows that do NOT overlap the month
+                    keep_mask = ~((bs <= m_end) & (be >= m_start))
+                    before = len(df)
+                    df2 = df.loc[keep_mask].copy()
+                    ok = _write_ws_by_name(logical_key, df2)
+                    return ok, before - len(df2)
+                else:
+                    return False, 0
+
+            # INIT / DISC / NCL: use their native date columns
             date_col = _date_col_for(logical_key)
             if not date_col or date_col not in df.columns: return False, 0
             s = pd.to_datetime(df[date_col], errors="coerce")
@@ -288,12 +299,44 @@ def render_admin_sidebar():
         def _dedupe_sheet(logical_key: str) -> tuple[bool, int]:
             df = _read_ws_by_name(logical_key)
             if df.empty: return True, 0
+
             if logical_key == "LEADS":
-                k = (df.get("Email","").astype(str).str.strip() + "|" +
-                     df.get("Matter ID","").astype(str).str.strip() + "|" +
-                     df.get("Stage","").astype(str).str.strip() + "|" +
-                     df.get("Initial Consultation With Pji Law","").astype(str) + "|" +
-                     df.get("Discovery Meeting With Pji Law","").astype(str))
+                # Primary key: Matter ID (when present)
+                df = df.copy()
+                df["__mid"] = df.get("Matter ID","").astype(str).str.strip()
+                has_mid  = df["__mid"].ne("")
+                no_mid   = ~has_mid
+
+                # With Matter ID: keep last occurrence of each ID
+                keep_mid = pd.Series(True, index=df.index)
+                if has_mid.any():
+                    # Keep the last occurrence -> dedupe keep='last'
+                    keep_mid = ~df.loc[has_mid, "__mid"].duplicated(keep="last")
+                    keep_mid = keep_mid.reindex(df.index, fill_value=False) | no_mid
+
+                # Without Matter ID: fallback composite key (older behavior)
+                subset_no_mid = df.loc[no_mid].copy()
+                if not subset_no_mid.empty:
+                    k_nom = (
+                        subset_no_mid.get("Email","").astype(str).str.strip() + "|" +
+                        subset_no_mid.get("Matter ID","").astype(str).str.strip() + "|" +
+                        subset_no_mid.get("Stage","").astype(str).str.strip() + "|" +
+                        subset_no_mid.get("Initial Consultation With Pji Law","").astype(str) + "|" +
+                        subset_no_mid.get("Discovery Meeting With Pji Law","").astype(str)
+                    )
+                    keep_nom = ~k_nom.duplicated(keep="last")
+                    to_keep_idx = subset_no_mid.index[keep_nom]
+                    keep_nom_series = pd.Series(False, index=df.index)
+                    keep_nom_series.loc[to_keep_idx] = True
+                else:
+                    keep_nom_series = pd.Series(False, index=df.index)
+
+                keep_final = keep_mid | keep_nom_series
+                before = len(df)
+                df2 = df.loc[keep_final].drop(columns=["__mid"], errors="ignore")
+                ok = _write_ws_by_name(logical_key, df2)
+                return ok, before - len(df2)
+
             elif logical_key == "INIT":
                 k = (df.get("Email","").astype(str).str.strip() + "|" +
                      df.get("Matter ID","").astype(str).str.strip() + "|" +
@@ -316,10 +359,12 @@ def render_admin_sidebar():
                 k = (df.get("Month-Year","").astype(str).str.strip() + "|" +
                      df.get("Name","").astype(str).str.strip() + "|" +
                      df.get("Category","").astype(str).str.strip())
-            before = len(df)
-            df2 = df.loc[~k.duplicated(keep="last")].copy()
-            ok = _write_ws_by_name(logical_key, df2)
-            return ok, before - len(df2)
+
+            if logical_key != "LEADS":
+                before = len(df)
+                df2 = df.loc[~k.duplicated(keep="last")].copy()
+                ok = _write_ws_by_name(logical_key, df2)
+                return ok, before - len(df2)
 
         st.divider()
         st.subheader("Maintenance")
@@ -327,7 +372,7 @@ def render_admin_sidebar():
 
         with st.container(border=True):
             st.markdown("**Purge a month**")
-            st.caption("Remove all rows for the selected sheet and month (above).")
+            st.caption("Removes rows for the selected sheet and month. For Leads/PNCs this uses the upload window.")
             if st.button("Purge Month", use_container_width=True):
                 ok, removed = _purge_month(key, int(yr), int(mo))
                 if ok:
@@ -336,11 +381,11 @@ def render_admin_sidebar():
                     else:              st.session_state.get("hashes_conv", set()).clear()
                     st.session_state["gs_ver"] += 1; st.rerun()
                 else:
-                    st.warning("Nothing purged (missing date column or unsupported for this sheet).")
+                    st.warning("Nothing purged (missing date/batch columns or unsupported for this sheet).")
 
         with st.container(border=True):
             st.markdown("**Re-dedupe sheet**")
-            st.caption("Rebuilds unique rows using the same keys as the uploader.")
+            st.caption("Rebuilds unique rows using dataset-specific keys (Leads use Matter ID if present).")
             if st.button("Re-dedupe sheet", use_container_width=True):
                 ok, removed = _dedupe_sheet(key)
                 st.success(f"Removed {removed} duplicate row(s).") if ok else st.error("Re-dedupe failed.")
@@ -431,6 +476,7 @@ def process_calls_csv(raw: pd.DataFrame, period_key: str) -> pd.DataFrame:
                 rename_map[actual] = canonical; used.add(actual); break
     df = raw.rename(columns=rename_map).copy()
 
+    # Combine split incoming/outgoing if present
     def norm2(s: str) -> str:
         return re.sub(r"[^a-z0-9 ]","",re.sub(r"[\s_]+"," ",s.strip().lower()))
     incoming = [c for c in raw.columns if norm2(c) in {"incoming internal","incoming external","incoming"}]
@@ -590,7 +636,7 @@ with st.expander("🧾 Data Upload (Calls & Conversion)", expanded=st.session_st
 
     up_leads = st.file_uploader("Upload **Leads_PNCs**", type=["csv","xls","xlsx"],
                                 key="up_leads_pncs", on_change=_keep_open_flag, args=("exp_upload_open",))
-    replace_leads = st.checkbox("Replace matching records in Leads (Email+Matter ID+Stage+IC Date+DM Date)",
+    replace_leads = st.checkbox("Replace matching records in Leads (by overlapping upload window or Matter ID)",
                                 key="rep_leads")
 
     up_init  = st.file_uploader("Upload **Initial_Consultation**", type=["csv","xls","xlsx"],
@@ -705,25 +751,16 @@ with st.expander("🧾 Data Upload (Calls & Conversion)", expanded=st.session_st
 
             current = _read_ws_by_name(key_name)
 
+            # Replacement rules
             if want_replace and not current.empty:
                 if key_name == "LEADS":
-                    key_in = (
-                        df_up.get("Email","").astype(str).str.strip() + "|" +
-                        df_up.get("Matter ID","").astype(str).str.strip() + "|" +
-                        df_up.get("Stage","").astype(str).str.strip() + "|" +
-                        df_up.get("Initial Consultation With Pji Law","").astype(str) + "|" +
-                        df_up.get("Discovery Meeting With Pji Law","").astype(str)
-                    )
-                    incoming_keys = set(key_in.tolist())
-                    key_cur = (
-                        current.get("Email","").astype(str).str.strip() + "|" +
-                        current.get("Matter ID","").astype(str).str.strip() + "|" +
-                        current.get("Stage","").astype(str).str.strip() + "|" +
-                        current.get("Initial Consultation With Pji Law","").astype(str) + "|" +
-                        current.get("Discovery Meeting With Pji Law","").astype(str)
-                    )
-                    mask_keep = ~key_cur.isin(incoming_keys)
-                    current = current.loc[mask_keep].copy()
+                    # Drop any existing rows whose batch window overlaps the new batch window
+                    if {"__batch_start","__batch_end"} <= set(current.columns):
+                        bs = pd.to_datetime(current["__batch_start"], errors="coerce")
+                        be = pd.to_datetime(current["__batch_end"], errors="coerce")
+                        s_new, e_new = pd.Timestamp(upload_start), pd.Timestamp(upload_end)
+                        keep_mask = ~((bs <= e_new) & (be >= s_new))
+                        current = current.loc[keep_mask].copy()
                 elif key_name == "INIT":
                     col = "Initial Consultation With Pji Law"
                     if col in current.columns:
@@ -742,30 +779,55 @@ with st.expander("🧾 Data Upload (Calls & Conversion)", expanded=st.session_st
 
             combined = pd.concat([current, df_up], ignore_index=True) if not current.empty else df_up.copy()
 
-            # Dedupe by dataset keys
+            # Dataset-specific dedupe
             if key_name == "LEADS":
-                k = (combined.get("Email","").astype(str).str.strip() + "|" +
-                     combined.get("Matter ID","").astype(str).str.strip() + "|" +
-                     combined.get("Stage","").astype(str).str.strip() + "|" +
-                     combined.get("Initial Consultation With Pji Law","").astype(str) + "|" +
-                     combined.get("Discovery Meeting With Pji Law","").astype(str))
+                combined = combined.copy()
+                combined["__mid"] = combined.get("Matter ID","").astype(str).str.strip()
+                has_mid = combined["__mid"].ne("")
+                # Dedupe by Matter ID when present
+                dedup_by_mid = pd.Series(True, index=combined.index)
+                if has_mid.any():
+                    dedup_by_mid = ~combined.loc[has_mid, "__mid"].duplicated(keep="last")
+                    dedup_by_mid = dedup_by_mid.reindex(combined.index, fill_value=False) | ~has_mid
+                # Fallback composite for rows without Matter ID
+                subset_no_mid = combined.loc[~has_mid].copy()
+                if not subset_no_mid.empty:
+                    k_nom = (
+                        subset_no_mid.get("Email","").astype(str).str.strip() + "|" +
+                        subset_no_mid.get("Matter ID","").astype(str).str.strip() + "|" +
+                        subset_no_mid.get("Stage","").astype(str).str.strip() + "|" +
+                        subset_no_mid.get("Initial Consultation With Pji Law","").astype(str) + "|" +
+                        subset_no_mid.get("Discovery Meeting With Pji Law","").astype(str)
+                    )
+                    keep_nom = ~k_nom.duplicated(keep="last")
+                    keep_nom_series = pd.Series(False, index=combined.index)
+                    keep_nom_series.loc[subset_no_mid.index[keep_nom]] = True
+                else:
+                    keep_nom_series = pd.Series(False, index=combined.index)
+                keep_final = dedup_by_mid | keep_nom_series
+                combined = combined.loc[keep_final].drop(columns=["__mid"], errors="ignore")
+
             elif key_name == "INIT":
                 k = (combined.get("Email","").astype(str).str.strip() + "|" +
                      combined.get("Matter ID","").astype(str).str.strip() + "|" +
                      combined.get("Initial Consultation With Pji Law","").astype(str) + "|" +
                      combined.get("Sub Status","").astype(str).str.strip())
+                combined = combined.loc[~k.duplicated(keep="last")].copy()
+
             elif key_name == "DISC":
                 k = (combined.get("Email","").astype(str).str.strip() + "|" +
                      combined.get("Matter ID","").astype(str).str.strip() + "|" +
                      combined.get("Discovery Meeting With Pji Law","").astype(str) + "|" +
                      combined.get("Sub Status","").astype(str).str.strip())
+                combined = combined.loc[~k.duplicated(keep="last")].copy()
+
             else:  # NCL
                 k = (combined.get("Client Name","").astype(str).str.strip() + "|" +
                      combined.get("Matter Number/Link","").astype(str).str.strip() + "|" +
                      combined.get("Date we had BOTH the signed CLA and full payment","").astype(str) + "|" +
                      combined.get("Retained With Consult (Y/N)","").astype(str).str.strip())
+                combined = combined.loc[~k.duplicated(keep="last")].copy()
 
-            combined = combined.loc[~k.duplicated(keep="last")].copy()
             _write_ws_by_name(key_name, combined)
             st.success(f"{key_name}: upserted {len(df_up)} row(s).")
             st.session_state["hashes_conv"].add(fhash)
@@ -862,6 +924,62 @@ if not view_calls.empty:
 else:
     st.info("No rows match the current Calls filters.")
 
+st.subheader("Calls — Visualizations")
+try:
+    import plotly.express as px
+    plotly_ok = True
+except Exception:
+    plotly_ok = False
+    st.info("Charts unavailable (install `plotly>=5.22` in requirements.txt).")
+
+if not view_calls.empty and plotly_ok:
+    vol = (view_calls.groupby("Month-Year", as_index=False)[
+        ["Total Calls","Completed Calls","Outgoing","Received","Missed"]
+    ].sum())
+    vol["_ym"] = pd.to_datetime(vol["Month-Year"]+"-01", format="%Y-%m-%d", errors="coerce")
+    vol = vol.sort_values("_ym")
+    vol_long = vol.melt(id_vars=["Month-Year","_ym"],
+                        value_vars=["Total Calls","Completed Calls","Outgoing","Received","Missed"],
+                        var_name="Metric", value_name="Count")
+    with st.expander("📈 Call volume trend over time", expanded=False):
+        fig1 = px.line(vol_long, x="_ym", y="Count", color="Metric", markers=True,
+                       labels={"_ym":"Month","Count":"Calls"})
+        fig1.update_layout(xaxis=dict(tickformat="%b %Y"))
+        st.plotly_chart(fig1, use_container_width=True)
+
+    comp = view_calls.groupby("Name", as_index=False)[["Completed Calls", "Total Calls"]].sum()
+    if comp.empty or not {"Completed Calls","Total Calls"} <= set(comp.columns):
+        with st.expander("✅ Completion rate by staff", expanded=False):
+            st.info("No data available to compute completion rates for the current filters.")
+    else:
+        c_done = pd.to_numeric(comp["Completed Calls"], errors="coerce").fillna(0.0)
+        c_tot  = pd.to_numeric(comp["Total Calls"], errors="coerce").fillna(0.0)
+        comp["Completion Rate (%)"] = (c_done / c_tot.where(c_tot != 0, pd.NA) * 100).fillna(0.0)
+        comp = comp.sort_values("Completion Rate (%)", ascending=False)
+        with st.expander("✅ Completion rate by staff", expanded=False):
+            fig2 = px.bar(comp, x="Name", y="Completion Rate (%)",
+                          labels={"Name":"Staff","Completion Rate (%)":"Completion Rate (%)"})
+            fig2.update_layout(xaxis={'categoryorder':'array','categoryarray':comp["Name"].tolist()})
+            st.plotly_chart(fig2, use_container_width=True)
+
+    tmp = view_calls.copy()
+    tmp["__avg_sec"]   = pd.to_numeric(tmp.get("__avg_sec", 0), errors="coerce").fillna(0.0)
+    tmp["Total Calls"] = pd.to_numeric(tmp.get("Total Calls", 0), errors="coerce").fillna(0.0)
+    tmp["weighted_sum"] = tmp["__avg_sec"] * tmp["Total Calls"]
+    by = tmp.groupby("Name", as_index=False).agg(
+        weighted_sum=("weighted_sum", "sum"),
+        total_calls=("Total Calls", "sum"),
+    )
+    by["Avg Minutes"] = by.apply(
+        lambda r: (r["weighted_sum"] / r["total_calls"] / 60.0) if r["total_calls"] > 0 else 0.0,
+        axis=1,
+    )
+    by = by.sort_values("Avg Minutes", ascending=False)
+    with st.expander("⏱️ Average call duration by staff (minutes)", expanded=False):
+        fig3 = px.bar(by, x="Avg Minutes", y="Name", orientation="h",
+                      labels={"Avg Minutes":"Minutes","Name":"Staff"})
+        st.plotly_chart(fig3, use_container_width=True)
+
 # ───────────────────────────────────────────────────────────────────────────────
 # Conversion Report (controls aligned: Period • Year • Month)
 # ───────────────────────────────────────────────────────────────────────────────
@@ -951,28 +1069,14 @@ init_in = df_init.loc[init_mask].copy() if not df_init.empty else pd.DataFrame()
 disc_in = df_disc.loc[disc_mask].copy() if not df_disc.empty else pd.DataFrame()
 ncl_in  = df_ncl.loc[ncl_mask].copy()  if not df_ncl.empty  else pd.DataFrame()
 
-# Leads & PNCs — derive from upload window columns (robust)
-def _leads_window_mask(df: pd.DataFrame, start_d: date, end_d: date) -> pd.Series:
-    if df is None or df.empty:
-        return pd.Series(False, index=pd.RangeIndex(0))
-    start_ts, end_ts = pd.Timestamp(start_d), pd.Timestamp(end_d)
-    # Candidate column name pairs for the upload window
-    candidates = [
-        ("__batch_start", "__batch_end"),
-        ("Upload Window Start", "Upload Window End"),
-    ]
-    for c0, c1 in candidates:
-        if c0 in df.columns and c1 in df.columns:
-            bs = pd.to_datetime(df[c0], errors="coerce")
-            be = pd.to_datetime(df[c1], errors="coerce")
-            return (bs <= end_ts) & (be >= start_ts)
-    # If missing, warn once and treat as out-of-range (so counts don't go wild)
-    if not st.session_state.get("warned_missing_leads_batch", False):
-        st.session_state["warned_missing_leads_batch"] = True
-        st.warning("Leads/PNCs sheet is missing upload window columns. Re-upload Leads_PNCs with the proper date range so these counts filter correctly.")
-    return pd.Series(False, index=df.index)
-
-leads_in_range = _leads_window_mask(df_leads, start_date, end_date)
+# Leads & PNCs — use batch period we stored on upload (overlap logic)
+if not df_leads.empty and {"__batch_start","__batch_end"} <= set(df_leads.columns):
+    bs = pd.to_datetime(df_leads["__batch_start"], errors="coerce")
+    be = pd.to_datetime(df_leads["__batch_end"],   errors="coerce")
+    start_ts, end_ts = pd.Timestamp(start_date), pd.Timestamp(end_date)
+    leads_in_range = (bs <= end_ts) & (be >= start_ts)
+else:
+    leads_in_range = pd.Series(False, index=df_leads.index)  # until re-uploaded with batch dates
 
 EXCLUDED_PNC_STAGES = {
     "Marketing/Scam/Spam (Non-Lead)","Referred Out","No Stage","New Lead",
@@ -1003,49 +1107,26 @@ for candidate in ["Retained With Consult (Y/N)", "Retained with Consult (Y/N)"]:
         ncl_flag_col = candidate; break
 if ncl_flag_col:
     flag_in = ncl_in[ncl_flag_col].astype(str).str.strip().str.upper()
-    row3 = int((flag_in == "N").sum())        # retained without consult
-    row8 = int((flag_in != "N").sum())        # retained after consult
+    row3 = int((flag_in == "N").sum())
+    row8 = int((flag_in != "N").sum())
 else:
     row3 = 0
     row8 = int(ncl_in.shape[0])
 
-row10 = int(ncl_in.shape[0])                  # total retained
+row10 = int(ncl_in.shape[0])
 
-# ── Final rules for Scheduled/Showed (Column I and Follow Up) ──────────────────
-def _col_I_name(df: pd.DataFrame) -> Optional[str]:
-    # Prefer explicit header if present; else fall back to absolute column I.
-    if "Status" in df.columns:  # common header for this column
-        return "Status"
-    return df.columns[8] if (isinstance(df, pd.DataFrame) and len(df.columns) > 8) else None
+# Scheduled = all IC + all DM (we do NOT exclude No Show here; that's for "showed up")
+row4 = int(init_in.shape[0] + disc_in.shape[0])
 
-def compute_sched_showed(df: pd.DataFrame, date_col: str) -> Tuple[int, int, Dict[str,int], Dict[str,int]]:
-    if df is None or df.empty or date_col not in df.columns:
-        return 0, 0, {}, {}
-    sub = df.get("Sub Status", "").astype(str).str.strip().str.lower()
-    not_follow = ~(sub == "follow up")
-    sched_mask = not_follow
+# Showed up = subtract rows where Column I ("Status"/attendance) has a value in IC/DM
+def _not_show_mask(s: pd.Series) -> pd.Series:
+    # any non-empty in Column I indicates did-not-show (No Show / Canceled / trailing text)
+    ss = s.astype(str)
+    return ss.str.strip().ne("")
 
-    colI = _col_I_name(df)
-    if colI is not None and colI in df.columns:
-        non_empty_I = df[colI].astype(str).str.strip().ne("")
-    else:
-        non_empty_I = pd.Series(False, index=df.index)
-
-    showed_mask = sched_mask & (~non_empty_I)
-
-    scheduled = int(sched_mask.sum())
-    showed = int(showed_mask.sum())
-
-    atty_series = df.get("Lead Attorney", "").astype(str).str.strip()
-    by_sched = atty_series.loc[sched_mask].value_counts().to_dict()
-    by_show  = atty_series.loc[showed_mask].value_counts().to_dict()
-    return scheduled, showed, by_sched, by_show
-
-ic_scheduled, ic_showed, ic_by_sched, ic_by_show = compute_sched_showed(init_in, "Initial Consultation With Pji Law")
-dm_scheduled, dm_showed, dm_by_sched, dm_by_show = compute_sched_showed(disc_in, "Discovery Meeting With Pji Law")
-
-row4 = int(ic_scheduled + dm_scheduled)      # PNCs who scheduled consultation
-row6 = int(ic_showed + dm_showed)            # PNCs who showed up for consultation
+init_no_show = _not_show_mask(init_in.get(init_in.columns[8], "")) if not init_in.empty and len(init_in.columns) > 8 else pd.Series(False, index=init_in.index)
+disc_no_show = _not_show_mask(disc_in.get(disc_in.columns[8], "")) if not disc_in.empty and len(disc_in.columns) > 8 else pd.Series(False, index=disc_in.index)
+row6 = int((~init_no_show).sum() + (~disc_no_show).sum())
 
 def _pct(numer, denom): return 0 if (denom is None or denom == 0) else round((numer/denom)*100)
 
@@ -1054,7 +1135,10 @@ row7  = _pct(row6, row4)
 row9  = _pct(row8, row4)
 row11 = _pct(row10, row2)
 
-# Styled HTML KPI table (static)
+# Styled HTML KPI table (no index, no sorting)
+def _html_escape(s: str) -> str:
+    return (str(s).replace("&","&amp;").replace("<","&lt;").replace(">","&gt;"))
+
 kpi_rows = [
     ("# of Leads", row1),
     ("# of PNCs", row2),
@@ -1068,8 +1152,7 @@ kpi_rows = [
     ("# of Total PNCs who retained", row10),
     ("% of total PNCs who retained", f"{row11}%"),
 ]
-def _html_escape(s: str) -> str:
-    return (str(s).replace("&","&amp;").replace("<","&lt;").replace(">","&gt;"))
+
 table_rows = "\n".join(
     f"<tr><td>{_html_escape(k)}</td><td style='text-align:right'>{_html_escape(v)}</td></tr>"
     for k, v in kpi_rows
@@ -1090,10 +1173,11 @@ html_table = f"""
 st.markdown(html_table, unsafe_allow_html=True)
 
 # ───────────────────────────────────────────────────────────────────────────────
-# Conversion → Practice Area (static tables; no sorting; no left index)
+# Conversion → Practice Area (collapsible sections with attorney filter)
 # ───────────────────────────────────────────────────────────────────────────────
 st.subheader("Practice Area")
 
+# Config per spec
 PRACTICE_AREAS = {
     "Estate Planning": ["Connor Watkins", "Jennifer Fox", "Rebecca Megel"],
     "Estate Administration": ["Adam Hill", "Elias Kerby", "Elizabeth Ross", "Garrett Kizer", "Kyle Grabulis", "Sarah Kravetz"],
@@ -1106,13 +1190,30 @@ DISPLAY_NAME_OVERRIDES = {
     "William Gogoel": "Will Gogoel",
     "Andrew Suddarth": "Andy Suddarth",
 }
+
+# Initials map (used for NCL retained counts)
 ATTORNEY_TO_INITIALS = {
-    "Connor Watkins": "CW","Jennifer Fox": "JF","Rebecca Megel": "RM","Adam Hill": "AH","Elias Kerby": "EK",
-    "Elizabeth Ross": "ER","Garrett Kizer": "GK","Kyle Grabulis": "KG","Sarah Kravetz": "SK",
-    "Andrew Suddarth": "AS","William Bang": "WB","Bret Giaimo": "BG","Hannah Supernor": "HS",
-    "Laura Kouremetis": "LK","Lukios Stefan": "LS","William Gogoel": "WG","Kevin Jaros": "KJ",
+    "Connor Watkins": "CW",
+    "Jennifer Fox": "JF",
+    "Rebecca Megel": "RM",
+    "Adam Hill": "AH",
+    "Elias Kerby": "EK",
+    "Elizabeth Ross": "ER",
+    "Garrett Kizer": "GK",
+    "Kyle Grabulis": "KG",
+    "Sarah Kravetz": "SK",
+    "Andrew Suddarth": "AS",
+    "William Bang": "WB",
+    "Bret Giaimo": "BG",
+    "Hannah Supernor": "HS",
+    "Laura Kouremetis": "LK",
+    "Lukios Stefan": "LS",
+    "William Gogoel": "WG",
+    "Kevin Jaros": "KJ",
 }
 INITIALS_TO_ATTORNEY = {v: k for k, v in ATTORNEY_TO_INITIALS.items()}
+
+# Name normalization (handles "Last, First", first-name-only, nicknames)
 ALIASES = {
     **{n.lower(): n for n in sum(PRACTICE_AREAS.values(), [])},
     "connor":"Connor Watkins","jennifer":"Jennifer Fox","jen":"Jennifer Fox","rebecca":"Rebecca Megel",
@@ -1128,6 +1229,7 @@ ALIASES = {
     "supernor, hannah":"Hannah Supernor","kouremetis, laura":"Laura Kouremetis","stefan, lukios":"Lukios Stefan",
     "gogoel, william":"William Gogoel","jaros, kevin":"Kevin Jaros",
 }
+
 def _norm_name(raw: str) -> str:
     if not isinstance(raw, str) or not raw.strip():
         return ""
@@ -1139,166 +1241,140 @@ def _norm_name(raw: str) -> str:
     if "gogoel" in toks: return "William Gogoel"
     if toks and toks[0] in ALIASES: return ALIASES[toks[0]]
     return v
-def _display(n: str) -> str: return DISPLAY_NAME_OVERRIDES.get(n, n)
+
+def _display(n: str) -> str:
+    return DISPLAY_NAME_OVERRIDES.get(n, n)
+
 def _practice_for(name: str) -> str:
     for pa, names in PRACTICE_AREAS.items():
         if name in names: return pa
     return "Other"
-def _norm_initials(x: str) -> str: return re.sub(r"[^A-Z]", "", str(x or "").upper())
 
-# "Met with" by attorney = SHOWED from IC+DM
-def _counts_by_attorney() -> pd.Series:
-    def _showed_mask(df):
-        if df.empty: return pd.Series([], dtype=bool)
-        sub = df.get("Sub Status","").astype(str).str.strip().str.lower()
-        not_follow = ~(sub == "follow up")
-        colI = _col_I_name(df)
-        non_empty_I = (df[colI].astype(str).str.strip().ne("")) if (colI and colI in df.columns) else pd.Series(False, index=df.index)
-        return not_follow & (~non_empty_I)
+def _norm_initials(x: str) -> str:
+    # Treat 'c.w.', ' cw ', 'C W', 'cw' → 'CW'
+    return re.sub(r"[^A-Z]", "", str(x or "").upper())
 
-    ic_la = init_in.get("Lead Attorney","").astype(str).map(_norm_name)
-    dm_la = disc_in.get("Lead Attorney","").astype(str).map(_norm_name)
+# Initial_Consultation: include all in range; we will use Column I to derive show/no-show elsewhere
+init_work = init_in.copy()
+if not init_work.empty:
+    init_work["Lead Attorney"] = init_work.get("Lead Attorney","").astype(str).map(_norm_name)
 
-    ic_counts = ic_la.loc[_showed_mask(init_in)].value_counts()
-    dm_counts = dm_la.loc[_showed_mask(disc_in)].value_counts()
-    out = pd.concat([ic_counts, dm_counts], axis=1).fillna(0).sum(axis=1)
+# Discovery_Meeting: exclude Sub Status == Follow Up; else keep
+disc_work = disc_in.copy()
+if not disc_work.empty:
+    disc_work["Lead Attorney"] = disc_work.get("Lead Attorney","").astype(str).map(_norm_name)
+    not_follow = ~disc_work.get("Sub Status","").astype(str).str.strip().str.lower().eq("follow up")
+    disc_work = disc_work.loc[not_follow].copy()
 
-    # Robust index cleanup (avoid Index.astype attr errors on some pandas builds)
-    idx_str = pd.Index([("" if x is None else str(x)) for x in out.index])
-    mask = idx_str.str.strip().ne("")
-    return out[mask]
+# Meetings per attorney = IC + DM (counts)
+ic_counts = (init_work["Lead Attorney"].value_counts() if "Lead Attorney" in init_work.columns else pd.Series(dtype=int))
+dm_counts = (disc_work["Lead Attorney"].value_counts() if "Lead Attorney" in disc_work.columns else pd.Series(dtype=int))
+meet = pd.concat([ic_counts.rename("IC"), dm_counts.rename("DM")], axis=1).fillna(0)
+meet["PNCs who met"] = meet["IC"] + meet["DM"]
+meet.index.name = "Attorney"
+meet = meet.reset_index()
 
-met_by_atty = _counts_by_attorney() if (not init_in.empty or not disc_in.empty) else pd.Series(dtype=float)
+# Ensure every configured attorney appears
+all_configured = sorted(set(sum(PRACTICE_AREAS.values(), [])))
+base_rows = pd.DataFrame({"Attorney": all_configured})
+meet = base_rows.merge(meet, on="Attorney", how="left").fillna({"IC":0,"DM":0,"PNCs who met":0})
 
-# Retained by attorney via initials from NCL
+# Retained per attorney (NCL): use initials in "Responsible Attorney" (preferred) or "Atty Initials"
 retained_flag_col = None
 for cand in ["Retained With Consult (Y/N)", "Retained with Consult (Y/N)"]:
     if cand in ncl_in.columns:
         retained_flag_col = cand; break
 
-def _retained_counts_by_attorney(ncl_slice: pd.DataFrame) -> pd.Series:
+def _retained_counts(ncl_slice: pd.DataFrame) -> pd.DataFrame:
     if ncl_slice.empty or retained_flag_col is None:
-        return pd.Series(dtype=int)
+        return pd.DataFrame({"Attorney": [], "PNCs who met and retained": []})
     flag = ncl_slice[retained_flag_col].astype(str).str.strip().str.upper()
     kept = ncl_slice.loc[flag != "N"].copy()
-    if kept.empty: return pd.Series(dtype=int)
-    if "Responsible Attorney" in kept.columns:
-        kept["_ini"] = kept["Responsible Attorney"].map(_norm_initials)
-    elif "Atty Initials" in kept.columns:
-        kept["_ini"] = kept["Atty Initials"].map(_norm_initials)
-    else:
-        return pd.Series(dtype=int)
+    if kept.empty:
+        return pd.DataFrame({"Attorney": [], "PNCs who met and retained": []})
+
+    # Choose initials source (Responsible Attorney preferred, else Atty Initials if present)
+    initials_col = "Responsible Attorney" if "Responsible Attorney" in kept.columns else ("Atty Initials" if "Atty Initials" in kept.columns else None)
+    if initials_col is None:
+        return pd.DataFrame({"Attorney": [], "PNCs who met and retained": []})
+
+    kept["_ini"] = kept[initials_col].map(_norm_initials)
     kept["_att"] = kept["_ini"].map(lambda ini: INITIALS_TO_ATTORNEY.get(ini, "Other"))
-    return kept["_att"].value_counts()
+    out = (kept["_att"]
+           .value_counts()
+           .rename("PNCs who met and retained")
+           .reset_index()
+           .rename(columns={"index":"Attorney"}))
+    return out
 
-retained_by_atty = _retained_counts_by_attorney(ncl_in)
+retained = _retained_counts(ncl_in)
+if retained.empty:
+    retained = pd.DataFrame({"Attorney": [], "PNCs who met and retained": []})
 
-# Build per-attorney report
-all_configured = sorted(set(sum(PRACTICE_AREAS.values(), [])))
-report_rows = []
-denom_pncs = int(row2)
+# Merge & compute percentage (Row 3 = retained ÷ # of PNCs from first block)
+report = meet.merge(retained, on="Attorney", how="left").fillna({"PNCs who met and retained": 0})
+report["Practice Area"] = report["Attorney"].map(_practice_for)
+report["Attorney_Display"] = report["Attorney"].map(_display)
 
-for atty in all_configured:
-    met = int(met_by_atty.get(atty, 0))
-    ret = int(retained_by_atty.get(atty, 0))
-    pct = 0.0 if denom_pncs == 0 else round((ret / denom_pncs) * 100.0, 2)
-    report_rows.append({
-        "Attorney": atty,
-        "Attorney_Display": _display(atty),
-        "Practice Area": _practice_for(atty),
-        "PNCs who met": met,
-        "PNCs who met and retained": ret,
-        "% of PNCs who met and retained": pct,
-    })
+denom_pncs = int(row2) if isinstance(row2, (int, float)) else 0
+report["% of PNCs who met and retained"] = report.apply(
+    lambda r: 0.0 if denom_pncs == 0 else round((r["PNCs who met and retained"] / denom_pncs) * 100.0, 2),
+    axis=1
+)
 
-others_set = set(met_by_atty.index.tolist() + retained_by_atty.index.tolist()) - set(all_configured)
-for atty in sorted(a for a in others_set if a and a.strip()):
-    met = int(met_by_atty.get(atty, 0))
-    ret = int(retained_by_atty.get(atty, 0))
-    pct = 0.0 if denom_pncs == 0 else round((ret / denom_pncs) * 100.0, 2)
-    report_rows.append({
-        "Attorney": atty,
-        "Attorney_Display": _display(atty),
-        "Practice Area": "Other",
-        "PNCs who met": met,
-        "PNCs who met and retained": ret,
-        "% of PNCs who met and retained": pct,
-    })
-
-report = pd.DataFrame(report_rows)
-
-# Static mini-table renderer
-def render_static_three_row(title_name: str, met: int, retained: int, pct: float):
-    def _esc(s: str) -> str:
-        return (str(s).replace("&","&amp;").replace("<","&lt;").replace(">","&gt;"))
+# Helper: static HTML (no sorting, no index) for each practice area
+def _render_pa_table(title_name: str, met: int, kept: int, pct: float) -> str:
     rows = [
-        (f"PNCs who met with {title_name}", f"{met}"),
-        (f"PNCs who met with {title_name} and retained", f"{ret}"),
+        (f"PNCs who met with {title_name}", f"{int(met)}"),
+        (f"PNCs who met with {title_name} and retained", f"{int(kept)}"),
         (f"% of PNCs who met with {title_name} and retained", f"{pct:.2f}%"),
     ]
-    tr = "\n".join(f"<tr><td>{_esc(k)}</td><td style='text-align:right'>{_esc(v)}</td></tr>" for k,v in rows)
-    html = f"""
-    <style>
-    .mini-table {{ width: 100%; border-collapse: collapse; font-size: 0.95rem; }}
-    .mini-table th, .mini-table td {{ border: 1px solid #eee; padding: 8px 10px; }}
-    .mini-table th {{ background: #fafafa; text-align: left; font-weight: 600; }}
-    </style>
-    <table class="mini-table">
+    trs = "\n".join(f"<tr><td>{_html_escape(k)}</td><td style='text-align:right'>{_html_escape(v)}</td></tr>" for k,v in rows)
+    return f"""
+    <table class="kpi-table" style="margin:8px 0 16px 0;">
       <thead><tr><th>Metric</th><th>Value</th></tr></thead>
-      <tbody>{tr}</tbody>
+      <tbody>{trs}</tbody>
     </table>
     """
-    st.markdown(html, unsafe_allow_html=True)
 
-# One expander per practice area with Attorney dropdown
+# UI: one expander per practice area with Attorney dropdown (incl. ALL)
 for pa in ["Estate Planning","Estate Administration","Civil Litigation","Business transactional","Other"]:
     sub = report.loc[report["Practice Area"] == pa].copy()
-    if sub.empty and pa != "Other":
+
+    # "ALL" row = sum of attorneys in that practice area
+    all_row = pd.DataFrame([{
+        "Attorney": "__ALL__", "Attorney_Display":"ALL",
+        "PNCs who met": int(sub["PNCs who met"].sum()),
+        "PNCs who met and retained": int(sub["PNCs who met and retained"].sum()),
+        "% of PNCs who met and retained": (0.0 if denom_pncs == 0 else round((sub["PNCs who met and retained"].sum() / denom_pncs) * 100.0, 2))
+    }])
+
+    show = pd.concat([all_row, sub[[
+        "Attorney","Attorney_Display","PNCs who met","PNCs who met and retained","% of PNCs who met and retained"
+    ]]], ignore_index=True)
+
+    if show.empty:
         continue
-    met_sum = int(sub["PNCs who met"].sum()) if not sub.empty else 0
-    ret_sum = int(sub["PNCs who met and retained"].sum()) if not sub.empty else 0
-    pct_all = 0.0 if denom_pncs == 0 else round((ret_sum / denom_pncs) * 100.0, 2)
 
     with st.expander(pa, expanded=False):
-        attys = ["ALL"] + (sub["Attorney_Display"].tolist() if not sub.empty else [])
+        attys = ["ALL"] + [n for n in show["Attorney_Display"].tolist() if n != "ALL"]
         pick = st.selectbox(f"{pa} — choose attorney", attys, key=f"pa_pick_{pa}")
-        if pick == "ALL":
-            render_static_three_row("ALL", met_sum, ret_sum, pct_all)
-        else:
-            r = sub.loc[sub["Attorney_Display"] == pick].iloc[0]
-            render_static_three_row(pick, int(r["PNCs who met"]), int(r["PNCs who met and retained"]), float(r["% of PNCs who met and retained"]))
 
-# ───────────────────────────────────────────────────────────────────────────────
-# Debug details (for reconciliation)
-# ───────────────────────────────────────────────────────────────────────────────
-with st.expander("Debug details (for reconciliation)", expanded=False):
-    if not df_leads.empty and "Stage" in df_leads.columns and 'leads_in_range' in locals():
-        st.write("Leads_PNCs — Stage (in selected period)",
-                 df_leads.loc[leads_in_range, "Stage"].value_counts(dropna=False))
-    if not init_in.empty:
-        st.write("IC — scheduled, showed", {"scheduled": ic_scheduled, "showed": ic_showed})
-        colI = _col_I_name(init_in)
-        if colI:
-            sub = init_in.get("Sub Status","").astype(str).str.strip().str.lower()
-            not_follow = ~(sub == "follow up")
-            st.write(f'IC — Column I (“{colI}”) non-empty (excl. Follow Up):',
-                     int((not_follow & init_in[colI].astype(str).str.strip().ne("")).sum()))
-    if not disc_in.empty:
-        st.write("DM — scheduled, showed", {"scheduled": dm_scheduled, "showed": dm_showed})
-        colI = _col_I_name(disc_in)
-        if colI:
-            sub = disc_in.get("Sub Status","").astype(str).str.strip().str.lower()
-            not_follow = ~(sub == "follow up")
-            st.write(f'DM — Column I (“{colI}”) non-empty (excl. Follow Up):',
-                     int((not_follow & disc_in[colI].astype(str).str.strip().ne("")).sum()))
-    if ncl_flag_col:
-        st.write("New Client List — Retained split (in range)", ncl_in[ncl_flag_col].value_counts(dropna=False))
-    st.write(
-        f"Computed: Leads={row1}, PNCs={row2}, "
-        f"Retained w/out consult={row3}, Scheduled={row4} ({row5}%), "
-        f"Showed={row6} ({row7}%), Retained after consult={row8} ({row9}%), "
-        f"Total retained={row10} ({row11}%)"
-    )
+        if pick == "ALL":
+            rowx = show.iloc[0]
+            title_name = "ALL"
+        else:
+            rowx = show.loc[show["Attorney_Display"] == pick].iloc[0]
+            title_name = pick
+
+        st.markdown(f"**Conversion Report: {title_name}**")
+        html = _render_pa_table(
+            title_name=title_name,
+            met=int(rowx["PNCs who met"]),
+            kept=int(rowx["PNCs who met and retained"]),
+            pct=float(rowx["% of PNCs who met and retained"]),
+        )
+        st.markdown(html, unsafe_allow_html=True)
 
 # ───────────────────────────────────────────────────────────────────────────────
 # Quiet logs (optional)
