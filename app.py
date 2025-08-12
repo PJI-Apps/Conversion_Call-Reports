@@ -1207,20 +1207,28 @@ CANON = list(dict.fromkeys(sum(PRACTICE_AREAS.values(), []) + OTHER_ATTORNEYS))
 met_counts_raw = _met_counts_from_ic_dm(df_init, df_disc)  # IC/DM "met with" (exact full names)
 met_by_attorney = {name: int(met_counts_raw.get(name, 0)) for name in CANON}
 
-# NCL retained (initials → full names) — function should already include JK/CM/JS/RB/PA etc.
+# NCL retained (initials → full names)
 retained_by_attorney = _retained_counts_from_ncl(df_ncl)
 retained_by_attorney = {} if retained_by_attorney is None else retained_by_attorney.to_dict()
+
+# Safe display-name mapper (avoids NameError)
+def _display_safe(n: str) -> str:
+    return globals().get("DISPLAY_NAME_OVERRIDES", {}).get(n, n)
 
 report = pd.DataFrame({"Attorney": CANON})
 report["PNCs who met"] = report["Attorney"].map(lambda a: int(met_by_attorney.get(a, 0)))
 report["PNCs who met and retained"] = report["Attorney"].map(lambda a: int(retained_by_attorney.get(a, 0)))
 report["Practice Area"] = report["Attorney"].map(_practice_for)
-report["Attorney_Display"] = report["Attorney"].map(
-    lambda n: DISPLAY_NAME_OVERRIDES.get(n, n) if "DISPLAY_NAME_OVERRIDES" in globals() else n
+report["Attorney_Display"] = report["Attorney"].map(_display_safe)
+
+# Define denominator from your earlier PNC calc (row2) — localize it here for safety
+denom_pncs = int(row2) if isinstance(row2, (int, float)) else 0
+
+# Per-attorney %: keep your original definition (share of total PNCs), not met-based
+report["% of PNCs who met and retained"] = report.apply(
+    lambda r: 0.0 if denom_pncs == 0 else round((r["PNCs who met and retained"] / denom_pncs) * 100.0, 2),
+    axis=1
 )
-
-
-
 
 # ---------- Render ----------
 def _render_three_row_card(title_name: str, met: int, kept: int, pct: float):
@@ -1248,13 +1256,16 @@ def _render_three_row_card(title_name: str, met: int, kept: int, pct: float):
 
 for pa in ["Estate Planning","Estate Administration","Civil Litigation","Business transactional","Other"]:
     sub = report.loc[report["Practice Area"] == pa].copy()
+
     met_sum  = int(sub["PNCs who met"].sum())
     kept_sum = int(sub["PNCs who met and retained"].sum())
+    # Keep your original convention: show area % as a share of *total PNCs* (row2), not met-based
     pct_sum  = 0.0 if denom_pncs == 0 else round((kept_sum / denom_pncs) * 100.0, 2)
 
     with st.expander(pa, expanded=False):
         attys = ["ALL"] + sub["Attorney_Display"].tolist()
         pick = st.selectbox(f"{pa} — choose attorney", attys, key=f"pa_pick_{pa.replace(' ','_')}")
+
         if pick == "ALL":
             _render_three_row_card("ALL", met_sum, kept_sum, pct_sum)
         else:
