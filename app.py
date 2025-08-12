@@ -1,7 +1,7 @@
 # Create a full updated app file that preserves the user's code and applies the agreed fixes.
 # We'll name it app_updated.py so it's easy to download separately.
 
-code = r'''# app.py
+# app.py
 # PJI Law • Conversion and Call Report (Streamlit)
 
 import io
