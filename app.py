@@ -208,7 +208,7 @@ def _write_ws_by_name(logical_key: str, df: pd.DataFrame):
         return False
 
 # ───────────────────────────────────────────────────────────────────────────────
-# Render Admin Sidebar early so it always shows
+# Render Admin Sidebar (always visible)
 # ───────────────────────────────────────────────────────────────────────────────
 def render_admin_sidebar():
     with st.sidebar.expander("📦 Master Data (Google Sheets) — Admin", expanded=False):
@@ -264,7 +264,7 @@ def render_admin_sidebar():
                 ok = _write_ws_by_name(logical_key, df2)
                 return ok, before - len(df2)
             date_col = _date_col_for(logical_key)
-            if not date_col or not date_col in df.columns: return False, 0
+            if not date_col or date_col not in df.columns: return False, 0
             s = pd.to_datetime(df[date_col], errors="coerce")
             mask_drop = (s.dt.year == int(year)) & (s.dt.month == int(month))
             removed = int(mask_drop.sum())
@@ -348,7 +348,7 @@ def render_admin_sidebar():
                     else:              st.session_state.get("hashes_conv", set()).clear()
                     st.session_state["gs_ver"] += 1; st.rerun()
 
-# Render it now (always visible thereafter)
+# Render admin panel now
 render_admin_sidebar()
 
 # ───────────────────────────────────────────────────────────────────────────────
@@ -523,9 +523,10 @@ def custom_weeks_for_month(year: int, month: int):
     return weeks
 
 def _mask_by_range_dates(df: pd.DataFrame, date_col: str, start: date, end: date) -> pd.Series:
+    """Robust mask that also strips 'at … TZ' text if present."""
     if df is None or df.empty or date_col not in df.columns:
         return pd.Series([False] * (0 if df is None else len(df)))
-    s = pd.to_datetime(df[date_col], errors="coerce").dt.date
+    s = pd.to_datetime(df[date_col].map(_clean_datestr), errors="coerce").dt.date
     return (s >= start) & (s <= end)
 
 # ───────────────────────────────────────────────────────────────────────────────
@@ -668,7 +669,7 @@ with st.expander("🧾 Data Upload (Calls & Conversion)", expanded=st.session_st
                "NCL":   (up_ncl,   replace_ncl)}
 
     def _mask_by_range(df: pd.DataFrame, col: str) -> pd.Series:
-        s = pd.to_datetime(df[col], errors="coerce")
+        s = pd.to_datetime(df[col].map(_clean_datestr), errors="coerce")
         return (s.dt.date >= upload_start) & (s.dt.date <= upload_end) & s.notna()
 
     for key_name, (upl, want_replace) in uploads.items():
@@ -853,69 +854,13 @@ if not view_calls.empty:
 else:
     st.info("No rows match the current Calls filters.")
 
-st.subheader("Calls — Visualizations")
-try:
-    import plotly.express as px
-    plotly_ok = True
-except Exception:
-    plotly_ok = False
-    st.info("Charts unavailable (install `plotly>=5.22` in requirements.txt).")
-
-if not view_calls.empty and plotly_ok:
-    vol = (view_calls.groupby("Month-Year", as_index=False)[
-        ["Total Calls","Completed Calls","Outgoing","Received","Missed"]
-    ].sum())
-    vol["_ym"] = pd.to_datetime(vol["Month-Year"]+"-01", format="%Y-%m-%d", errors="coerce")
-    vol = vol.sort_values("_ym")
-    vol_long = vol.melt(id_vars=["Month-Year","_ym"],
-                        value_vars=["Total Calls","Completed Calls","Outgoing","Received","Missed"],
-                        var_name="Metric", value_name="Count")
-    with st.expander("📈 Call volume trend over time", expanded=False):
-        fig1 = px.line(vol_long, x="_ym", y="Count", color="Metric", markers=True,
-                       labels={"_ym":"Month","Count":"Calls"})
-        fig1.update_layout(xaxis=dict(tickformat="%b %Y"))
-        st.plotly_chart(fig1, use_container_width=True)
-
-    comp = view_calls.groupby("Name", as_index=False)[["Completed Calls", "Total Calls"]].sum()
-    if comp.empty or not {"Completed Calls","Total Calls"} <= set(comp.columns):
-        with st.expander("✅ Completion rate by staff", expanded=False):
-            st.info("No data available to compute completion rates for the current filters.")
-    else:
-        c_done = pd.to_numeric(comp["Completed Calls"], errors="coerce").fillna(0.0)
-        c_tot  = pd.to_numeric(comp["Total Calls"], errors="coerce").fillna(0.0)
-        comp["Completion Rate (%)"] = (c_done / c_tot.where(c_tot != 0, pd.NA) * 100).fillna(0.0)
-        comp = comp.sort_values("Completion Rate (%)", ascending=False)
-        with st.expander("✅ Completion rate by staff", expanded=False):
-            fig2 = px.bar(comp, x="Name", y="Completion Rate (%)",
-                          labels={"Name":"Staff","Completion Rate (%)":"Completion Rate (%)"})
-            fig2.update_layout(xaxis={'categoryorder':'array','categoryarray':comp["Name"].tolist()})
-            st.plotly_chart(fig2, use_container_width=True)
-
-    tmp = view_calls.copy()
-    tmp["__avg_sec"]   = pd.to_numeric(tmp.get("__avg_sec", 0), errors="coerce").fillna(0.0)
-    tmp["Total Calls"] = pd.to_numeric(tmp.get("Total Calls", 0), errors="coerce").fillna(0.0)
-    tmp["weighted_sum"] = tmp["__avg_sec"] * tmp["Total Calls"]
-    by = tmp.groupby("Name", as_index=False).agg(
-        weighted_sum=("weighted_sum", "sum"),
-        total_calls=("Total Calls", "sum"),
-    )
-    by["Avg Minutes"] = by.apply(
-        lambda r: (r["weighted_sum"] / r["total_calls"] / 60.0) if r["total_calls"] > 0 else 0.0,
-        axis=1,
-    )
-    by = by.sort_values("Avg Minutes", ascending=False)
-    with st.expander("⏱️ Average call duration by staff (minutes)", expanded=False):
-        fig3 = px.bar(by, x="Avg Minutes", y="Name", orientation="h",
-                      labels={"Avg Minutes":"Minutes","Name":"Staff"})
-        st.plotly_chart(fig3, use_container_width=True)
-
 # ───────────────────────────────────────────────────────────────────────────────
 # Conversion Report (controls aligned: Period • Year • Month)
 # ───────────────────────────────────────────────────────────────────────────────
 st.markdown("---")
 st.header("Conversion Report")
 
-row = st.columns([2, 1, 1])  # Period (wide), Year, Month
+row = st.columns([2, 1, 1])
 
 months_map_names = {
     1:"January",2:"February",3:"March",4:"April",5:"May",6:"June",
@@ -928,7 +873,7 @@ def _years_from(*dfs_cols):
     ys = set()
     for df, col in dfs_cols:
         if df is not None and not df.empty and col in df.columns:
-            ys |= set(pd.to_datetime(df[col], errors="coerce").dt.year.dropna().astype(int))
+            ys |= set(pd.to_datetime(df[col].map(_clean_datestr), errors="coerce").dt.year.dropna().astype(int))
     return ys
 years_detected = _years_from(
     (df_ncl,  "Date we had BOTH the signed CLA and full payment"),
@@ -1029,25 +974,36 @@ row2 = int(
     ].shape[0]
 ) if not df_leads.empty and "Stage" in df_leads.columns else 0
 
-# NCL retained split within range
+# NCL retained split
 ncl_flag_col = None
 for candidate in ["Retained With Consult (Y/N)", "Retained with Consult (Y/N)"]:
     if candidate in ncl_in.columns:
         ncl_flag_col = candidate; break
 if ncl_flag_col:
     flag_in = ncl_in[ncl_flag_col].astype(str).str.strip().str.upper()
-    row3 = int((flag_in == "N").sum())
-    row8 = int((flag_in != "N").sum())
+    row3 = int((flag_in == "N").sum())       # retained w/out consult
+    row8 = int((flag_in != "N").sum())       # retained after consult
 else:
     row3 = 0
     row8 = int(ncl_in.shape[0])
 
-row10 = int(ncl_in.shape[0])
-row4 = int(init_in.shape[0] + disc_in.shape[0])
-row6 = int(
-    (init_in.get("Sub Status","").astype(str).str.strip() == "Pnc").sum()
-    + (disc_in.get("Sub Status","").astype(str).str.strip() == "Pnc").sum()
-)
+row10 = int(ncl_in.shape[0])                 # total retained
+
+# Scheduled consults (exclude No Show / Canceled; DM also exclude "Follow Up")
+def _ok_meeting_status(s: pd.Series) -> pd.Series:
+    bad = {"no show","no-show","no_show","canceled meeting","cancelled meeting","canceled","cancelled"}
+    return ~s.astype(str).str.strip().str.lower().isin(bad)
+
+init_sched = init_in.loc[_ok_meeting_status(init_in.get("Status",""))]
+disc_sched = disc_in.loc[_ok_meeting_status(disc_in.get("Status","")) &
+                         ~disc_in.get("Sub Status","").astype(str).str.strip().str.lower().eq("follow up")]
+row4 = int(init_sched.shape[0] + disc_sched.shape[0])
+
+# Showed up for consultation (treat Status in {PNC, Hired} as showed)
+def _showed(series: pd.Series) -> pd.Series:
+    v = series.astype(str).str.strip().str.lower()
+    return v.isin({"pnc","hired"})
+row6 = int(_showed(init_in.get("Status","")).sum() + _showed(disc_in.get("Status","")).sum())
 
 def _pct(numer, denom): return 0 if (denom is None or denom == 0) else round((numer/denom)*100)
 
@@ -1056,7 +1012,7 @@ row7  = _pct(row6, row4)
 row9  = _pct(row8, row4)
 row11 = _pct(row10, row2)
 
-# Styled HTML KPI table (static)
+# Styled HTML KPI table
 kpi_rows = [
     ("# of Leads", row1),
     ("# of PNCs", row2),
@@ -1092,8 +1048,15 @@ html_table = f"""
 """
 st.markdown(html_table, unsafe_allow_html=True)
 
+# Optional: show reconciliation numbers
+with st.expander("Debug details (for reconciliation)", expanded=False):
+    st.write("IC rows in range:", len(init_in), " → counted as scheduled:", len(init_sched))
+    st.write("DM rows in range:", len(disc_in), " → counted as scheduled:", len(disc_sched))
+    if ncl_flag_col:
+        st.write("New Client List — Retained split (in range)", ncl_in[ncl_flag_col].value_counts(dropna=False))
+
 # ───────────────────────────────────────────────────────────────────────────────
-# Conversion → Practice Area (collapsible sections with attorney filter)
+# Conversion → Practice Area (static tables, no sorting)
 # ───────────────────────────────────────────────────────────────────────────────
 st.subheader("Practice Area")
 
@@ -1109,14 +1072,12 @@ DISPLAY_NAME_OVERRIDES = {
     "William Gogoel": "Will Gogoel",
     "Andrew Suddarth": "Andy Suddarth",
 }
-
 ATTORNEY_TO_INITIALS = {
-    "Connor Watkins": "CW", "Jennifer Fox": "JF", "Rebecca Megel": "RM",
-    "Adam Hill": "AH", "Elias Kerby": "EK", "Elizabeth Ross": "ER",
-    "Garrett Kizer": "GK", "Kyle Grabulis": "KG", "Sarah Kravetz": "SK",
-    "Andrew Suddarth": "AS", "William Bang": "WB", "Bret Giaimo": "BG",
-    "Hannah Supernor": "HS", "Laura Kouremetis": "LK", "Lukios Stefan": "LS",
-    "William Gogoel": "WG", "Kevin Jaros": "KJ",
+    "Connor Watkins": "CW","Jennifer Fox": "JF","Rebecca Megel": "RM",
+    "Adam Hill": "AH","Elias Kerby": "EK","Elizabeth Ross": "ER","Garrett Kizer": "GK",
+    "Kyle Grabulis": "KG","Sarah Kravetz": "SK","Andrew Suddarth": "AS","William Bang": "WB",
+    "Bret Giaimo": "BG","Hannah Supernor": "HS","Laura Kouremetis": "LK","Lukios Stefan": "LS",
+    "William Gogoel": "WG","Kevin Jaros": "KJ",
 }
 INITIALS_TO_ATTORNEY = {v: k for k, v in ATTORNEY_TO_INITIALS.items()}
 
@@ -1137,8 +1098,7 @@ ALIASES = {
 }
 
 def _norm_name(raw: str) -> str:
-    if not isinstance(raw, str) or not raw.strip():
-        return ""
+    if not isinstance(raw, str) or not raw.strip(): return ""
     v = " ".join(raw.strip().split())
     key = v.lower()
     if key in ALIASES: return ALIASES[key]
@@ -1163,30 +1123,32 @@ def _practice_for(name: str) -> str:
 def _norm_initials(x: str) -> str:
     return re.sub(r"[^A-Z]", "", str(x or "").upper())
 
-# Initial_Consultation
+# Apply exclusions and counts for IC/DM
 init_work = init_in.copy()
 if not init_work.empty:
     init_work["Lead Attorney"] = init_work.get("Lead Attorney","").astype(str).map(_norm_name)
-    status_ok = _exclude_status_series(init_work["Status"]) if "Status" in init_work.columns else pd.Series(True, index=init_work.index)
-    init_work = init_work.loc[status_ok].copy()
+    init_work = init_work.loc[_exclude_status_series(init_work.get("Status",""))].copy()
 
-# Discovery_Meeting
 disc_work = disc_in.copy()
 if not disc_work.empty:
     disc_work["Lead Attorney"] = disc_work.get("Lead Attorney","").astype(str).map(_norm_name)
-    status_ok = _exclude_status_series(disc_work["Status"]) if "Status" in disc_work.columns else pd.Series(True, index=disc_work.index)
-    not_follow = ~disc_work["Sub Status"].astype(str).str.strip().str.lower().eq("follow up") if "Sub Status" in disc_work.columns else pd.Series(True, index=disc_work.index)
-    disc_work = disc_work.loc[status_ok & not_follow].copy()
+    ok_status = _exclude_status_series(disc_work.get("Status",""))
+    not_follow = ~disc_work.get("Sub Status","").astype(str).str.strip().str.lower().eq("follow up")
+    disc_work = disc_work.loc[ok_status & not_follow].copy()
 
-# Meetings per attorney
 ic_counts = (init_work["Lead Attorney"].value_counts() if "Lead Attorney" in init_work.columns else pd.Series(dtype=int))
 dm_counts = (disc_work["Lead Attorney"].value_counts() if "Lead Attorney" in disc_work.columns else pd.Series(dtype=int))
 meet = pd.concat([ic_counts.rename("IC"), dm_counts.rename("DM")], axis=1).fillna(0)
 meet["PNCs who met"] = meet["IC"] + meet["DM"]
-idx_name = meet.index.name or "index"
-meet = meet.reset_index().rename(columns={idx_name: "Attorney"})
+meet = meet.reset_index().rename(columns={"index":"Attorney"})
 
-# Retained from NCL
+# Ensure every configured attorney appears
+all_configured = sorted(set(sum(PRACTICE_AREAS.values(), [])))
+if "Attorney" not in meet.columns:
+    meet = pd.DataFrame(columns=["Attorney","IC","DM","PNCs who met"])
+meet = pd.DataFrame({"Attorney": all_configured}).merge(meet, on="Attorney", how="left").fillna({"IC":0,"DM":0,"PNCs who met":0})
+
+# Retained per attorney (NCL): use initials in Responsible Attorney (preferred) or Atty Initials
 retained_flag_col = None
 for cand in ["Retained With Consult (Y/N)", "Retained with Consult (Y/N)"]:
     if cand in ncl_in.columns:
@@ -1199,31 +1161,24 @@ def _retained_counts(ncl_slice: pd.DataFrame) -> pd.DataFrame:
     kept = ncl_slice.loc[flag != "N"].copy()
     if kept.empty:
         return pd.DataFrame({"Attorney": [], "PNCs who met and retained": []})
-    initials_col = None
-    for c in ["Responsible Attorney", "Atty Initials", "Attorney Initials"]:
-        if c in kept.columns:
-            initials_col = c; break
-    if initials_col is None:
+    if "Responsible Attorney" in kept.columns:
+        kept["_ini"] = kept["Responsible Attorney"].map(_norm_initials)
+    elif "Atty Initials" in kept.columns:
+        kept["_ini"] = kept["Atty Initials"].map(_norm_initials)
+    else:
         return pd.DataFrame({"Attorney": [], "PNCs who met and retained": []})
-    kept["_ini"] = kept[initials_col].map(_norm_initials)
     kept["_att"] = kept["_ini"].map(lambda ini: INITIALS_TO_ATTORNEY.get(ini, "Other"))
-    out = kept["_att"].value_counts().rename("PNCs who met and retained").reset_index()
-    out = out.rename(columns={out.columns[0]: "Attorney"})
+    out = (kept["_att"].value_counts()
+           .rename("PNCs who met and retained")
+           .reset_index().rename(columns={"index":"Attorney"}))
     return out
 
 retained = _retained_counts(ncl_in)
+if "Attorney" not in getattr(retained, "columns", []):
+    retained = pd.DataFrame(columns=["Attorney","PNCs who met and retained"])
 
-# Build base list & merge
-configured = sorted(set(sum(PRACTICE_AREAS.values(), [])))
-seen_meet = set(meet["Attorney"].unique().tolist()) if "Attorney" in meet.columns else set()
-seen_ret  = set(retained["Attorney"].unique().tolist()) if ("Attorney" in retained.columns and not retained.empty) else set()
-base_names = sorted(set(configured) | seen_meet | seen_ret)
-base_df = pd.DataFrame({"Attorney": base_names})
-
-report = base_df.merge(meet[["Attorney","PNCs who met"]], on="Attorney", how="left").merge(
-    retained, on="Attorney", how="left"
-).fillna({"PNCs who met": 0, "PNCs who met and retained": 0})
-
+# Merge & compute percentage
+report = meet.merge(retained, on="Attorney", how="left").fillna({"PNCs who met and retained": 0})
 report["Practice Area"] = report["Attorney"].map(_practice_for)
 report["Attorney_Display"] = report["Attorney"].map(_display)
 
@@ -1233,40 +1188,24 @@ report["% of PNCs who met and retained"] = report.apply(
     axis=1
 )
 
-# Static, unsortable practice-area tables (HTML, no index)
-def render_static_two_col(rows: list[tuple[str, str | int | float]]):
-    trs = "\n".join(
-        f"<tr><td>{_html_escape(k)}</td><td style='text-align:right'>{_html_escape(v)}</td></tr>"
-        for k, v in rows
-    )
-    html = f"""
-    <table class="kpi-table">
-      <thead><tr><th>Metric</th><th>Value</th></tr></thead>
-      <tbody>{trs}</tbody>
-    </table>
-    """
-    st.markdown(html, unsafe_allow_html=True)
-
+# UI: one expander per practice area (STATIC tables; unsortable; no left index)
 for pa in ["Estate Planning","Estate Administration","Civil Litigation","Business transactional","Other"]:
     sub = report.loc[report["Practice Area"] == pa].copy()
 
-    if sub.empty:
-        show = pd.DataFrame([{
-            "Attorney": "__ALL__", "Attorney_Display":"ALL",
-            "PNCs who met": 0,
-            "PNCs who met and retained": 0,
-            "% of PNCs who met and retained": 0.0
-        }])
-    else:
-        all_row = pd.DataFrame([{
-            "Attorney": "__ALL__", "Attorney_Display":"ALL",
-            "PNCs who met": int(sub["PNCs who met"].sum()),
-            "PNCs who met and retained": int(sub["PNCs who met and retained"].sum()),
-            "% of PNCs who met and retained": (0.0 if denom_pncs == 0 else round((sub["PNCs who met and retained"].sum() / denom_pncs) * 100.0, 2))
-        }])
-        show = pd.concat([all_row, sub[[
-            "Attorney","Attorney_Display","PNCs who met","PNCs who met and retained","% of PNCs who met and retained"
-        ]]], ignore_index=True)
+    # "ALL" row = sum of attorneys in that practice area
+    all_row = pd.DataFrame([{
+        "Attorney": "__ALL__", "Attorney_Display":"ALL",
+        "PNCs who met": int(sub["PNCs who met"].sum()),
+        "PNCs who met and retained": int(sub["PNCs who met and retained"].sum()),
+        "% of PNCs who met and retained": (0.0 if denom_pncs == 0 else round((sub["PNCs who met and retained"].sum() / denom_pncs) * 100.0, 2))
+    }])
+
+    show = pd.concat([all_row, sub[[
+        "Attorney","Attorney_Display","PNCs who met","PNCs who met and retained","% of PNCs who met and retained"
+    ]]], ignore_index=True)
+
+    if show.empty:
+        continue
 
     with st.expander(pa, expanded=False):
         attys = ["ALL"] + [n for n in show["Attorney_Display"].tolist() if n != "ALL"]
@@ -1280,29 +1219,19 @@ for pa in ["Estate Planning","Estate Administration","Civil Litigation","Busines
             title_name = pick
 
         st.markdown(f"**Conversion Report: {title_name}**")
-        rows = [
-            (f"PNCs who met with {title_name}", int(rowx["PNCs who met"])),
-            (f"PNCs who met with {title_name} and retained", int(rowx["PNCs who met and retained"])),
-            (f"% of PNCs who met with {title_name} and retained", f'{float(rowx["% of PNCs who met and retained"]):.2f}%'),
-        ]
-        render_static_two_col(rows)
-
-with st.expander("Debug details (for reconciliation)", expanded=False):
-    if not df_leads.empty and "Stage" in df_leads.columns and len(leads_in_range) == len(df_leads):
-        st.write("Leads_PNCs — Stage (in selected period)",
-                 df_leads.loc[leads_in_range, "Stage"].value_counts(dropna=False))
-    if not init_in.empty and "Sub Status" in init_in.columns:
-        st.write("Initial_Consultation — Sub Status (in range)", init_in["Sub Status"].value_counts(dropna=False))
-    if not disc_in.empty and "Sub Status" in disc_in.columns:
-        st.write("Discovery_Meeting — Sub Status (in range)",   disc_in["Sub Status"].value_counts(dropna=False))
-    if ncl_flag_col:
-        st.write("New Client List — Retained split (in range)", ncl_in[ncl_flag_col].value_counts(dropna=False))
-    st.write(
-        f"Computed: Leads={row1}, PNCs={row2}, "
-        f"Retained w/out consult={row3}, Scheduled={row4} ({row5}%), "
-        f"Showed={row6} ({row7}%), Retained after consult={row8} ({row9}%), "
-        f"Total retained={row10} ({row11}%)"
-    )
+        table_df = pd.DataFrame({
+            "Metric": [
+                f"PNCs who met with {title_name}",
+                f"PNCs who met with {title_name} and retained",
+                f"% of PNCs who met with {title_name} and retained",
+            ],
+            "Value": [
+                int(rowx["PNCs who met"]),
+                int(rowx["PNCs who met and retained"]),
+                f'{float(rowx["% of PNCs who met and retained"]):.2f}%',
+            ],
+        })
+        st.table(table_df.set_index("Metric"))  # static, no sorting, no extra index column
 
 # ───────────────────────────────────────────────────────────────────────────────
 # Quiet logs (optional)
