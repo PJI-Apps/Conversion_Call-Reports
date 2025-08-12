@@ -970,37 +970,34 @@ row2 = int(
     ].shape[0]
 ) if not df_leads.empty and "Stage" in df_leads.columns else 0
 
-# Helper to find a column by name (case-insensitive)
-def _find_col(df: pd.DataFrame, candidates: list[str]) -> Optional[str]:
-    if df is None or df.empty: return None
-    cols = {c.lower().strip(): c for c in df.columns}
-    for cand in candidates:
-        k = cand.lower().strip()
-        if k in cols: return cols[k]
-    return None
+# Helper to find a column by name (case-insensitive) — already defined earlier in your file
+# def _find_col(...)
 
-# IC/DM scheduled (exclude Sub Status == 'Follow Up'); showed = scheduled MINUS any non-empty value in **Column I (index 8)**
+# === FIXED: IC/DM scheduled & showed ===
+# Scheduled (exclude Sub Status == 'Follow Up'); Met-with = Scheduled MINUS any non-empty value in Column I (Reason for Rescheduling)
 def _scheduled_and_showed(df: pd.DataFrame, substatus_colname: Optional[str]) -> Tuple[int, int]:
-    if df is None or df.empty: return 0, 0
-    # Exclude Follow Up
+    if df is None or df.empty:
+        return 0, 0
+
+    # Exclude 'Follow Up'
     sub_col = substatus_colname if (substatus_colname and substatus_colname in df.columns) else _find_col(df, ["Sub Status"])
-    if sub_col and sub_col in df.columns:
-        scheduled_df = df.loc[~df[sub_col].astype(str).str.strip().str.lower().eq("follow up")].copy()
-    else:
-        scheduled_df = df.copy()
+    scheduled_df = df.copy()
+    if sub_col and sub_col in scheduled_df.columns:
+        scheduled_df = scheduled_df.loc[~scheduled_df[sub_col].astype(str).str.strip().str.lower().eq("follow up")].copy()
 
     scheduled = int(len(scheduled_df))
 
-    # Strict: use Column I (9th column, index 8) for "did not show"
-    non_show_mask = pd.Series(False, index=scheduled_df.index)
-    if scheduled_df.shape[1] >= 9:
-        col_i = scheduled_df.columns[8]
-        non_show_mask = scheduled_df[col_i].astype(str).fillna("").str.strip().ne("")
+    # Prefer the named Column I; fallback to physical 9th column (index 8)
+    reason_col = REASON_COL if (REASON_COL in scheduled_df.columns) else (scheduled_df.columns[8] if scheduled_df.shape[1] >= 9 else None)
+    if reason_col:
+        non_show_mask = scheduled_df[reason_col].astype(str).fillna("").str.strip().ne("")
+    else:
+        non_show_mask = pd.Series(False, index=scheduled_df.index)
 
     showed = int((~non_show_mask).sum())
     return scheduled, showed
 
-# Compute scheduled/showed for IC and DM
+# Compute scheduled/showed for IC and DM (using the corrected function)
 ic_sched, ic_show = _scheduled_and_showed(init_in, "Sub Status")
 dm_sched, dm_show = _scheduled_and_showed(disc_in, "Sub Status")
 
@@ -1090,6 +1087,8 @@ ATTORNEY_TO_INITIALS = {
     "Andrew Suddarth": "AS","William Bang": "WB","Bret Giaimo": "BG",
     "Hannah Supernor": "HS","Laura Kouremetis": "LK","Lukios Stefan": "LS",
     "William Gogoel": "WG","Kevin Jaros": "KJ",
+    # NEW: include “Other” bucket attorneys so they’re counted/rendered
+    "Robert Brown": "RB","Justine Sennott": "JS","Paul Abraham": "PA",
 }
 INITIALS_TO_ATTORNEY = {v: k for k, v in ATTORNEY_TO_INITIALS.items()}
 
@@ -1107,6 +1106,8 @@ ALIASES = {
     "suddarth, andrew":"Andrew Suddarth","bang, william":"William Bang","giaimo, bret":"Bret Giaimo",
     "supernor, hannah":"Hannah Supernor","kouremetis, laura":"Laura Kouremetis","stefan, lukios":"Lukios Stefan",
     "gogoel, william":"William Gogoel","jaros, kevin":"Kevin Jaros",
+    # helpful aliases for “Other”
+    "robert":"Robert Brown","justine":"Justine Sennott","paul":"Paul Abraham",
 }
 
 def _norm_name(raw: str) -> str:
@@ -1129,39 +1130,40 @@ def _practice_for(name: str) -> str:
         if name in names: return pa
     return "Other"
 
-# Count “PNCs who met” by atty (IC+DM), excluding “Follow Up” and any non-empty Column I (no-show)
+# === FIXED: per-attorney "met with" uses named Column I (fallback to 9th column) ===
 def _counts_met_by_attorney() -> pd.Series:
+    def _one(df: pd.DataFrame) -> pd.Series:
+        if df is None or df.empty:
+            return pd.Series(dtype=int)
+        df = df.copy()
+        # Lead Attorney (prefer name, fallback to Column L index if needed)
+        att_col = _find_col(df, ["Lead Attorney", "Attorney", "Lead atty"])
+        if att_col is None and df.shape[1] >= 12:
+            att_col = df.columns[11]  # Column L
+        if not att_col:
+            return pd.Series(dtype=int)
+
+        df[att_col] = df[att_col].astype(str).map(_norm_name)
+
+        sub_col = _find_col(df, ["Sub Status"])
+        if sub_col:
+            df = df.loc[~df[sub_col].astype(str).str.strip().str.lower().eq("follow up")].copy()
+
+        # Column I rule (prefer named Column I, else 9th column)
+        reason_col = REASON_COL if (REASON_COL in df.columns) else (df.columns[8] if df.shape[1] >= 9 else None)
+        if reason_col:
+            df = df.loc[df[reason_col].astype(str).fillna("").str.strip().eq("")].copy()
+
+        vc = df[att_col].value_counts(dropna=False)
+        return vc
+
     pieces = []
-    if not init_in.empty:
-        df = init_in.copy()
-        att_col = _find_col(df, ["Lead Attorney", "Attorney", "Lead atty"])
-        if att_col is None and df.shape[1] >= 12:
-            att_col = df.columns[11]  # column L
-        if att_col:
-            df[att_col] = df[att_col].astype(str).map(_norm_name)
-            sub_col = _find_col(df, ["Sub Status"])
-            if sub_col:
-                df = df.loc[~df[sub_col].astype(str).str.strip().str.lower().eq("follow up")].copy()
-            if df.shape[1] >= 9:
-                col_i = df.columns[8]
-                df = df.loc[df[col_i].astype(str).fillna("").str.strip().eq("")].copy()
-            pieces.append(df[att_col].value_counts())
-    if not disc_in.empty:
-        df = disc_in.copy()
-        att_col = _find_col(df, ["Lead Attorney", "Attorney", "Lead atty"])
-        if att_col is None and df.shape[1] >= 12:
-            att_col = df.columns[11]  # column L
-        if att_col:
-            df[att_col] = df[att_col].astype(str).map(_norm_name)
-            sub_col = _find_col(df, ["Sub Status"])
-            if sub_col:
-                df = df.loc[~df[sub_col].astype(str).str.strip().str.lower().eq("follow up")].copy()
-            if df.shape[1] >= 9:
-                col_i = df.columns[8]
-                df = df.loc[df[col_i].astype(str).fillna("").str.strip().eq("")].copy()
-            pieces.append(df[att_col].value_counts())
+    if not init_in.empty: pieces.append(_one(init_in))
+    if not disc_in.empty: pieces.append(_one(disc_in))
+
     if not pieces:
         return pd.Series(dtype=int)
+
     out = pd.concat(pieces, axis=1).fillna(0).sum(axis=1)
     idx_str = out.index.to_series().astype(str)
     return out[idx_str.str.strip().ne("")].astype(int)
@@ -1208,7 +1210,7 @@ retained = _retained_counts(ncl_in)
 if "Attorney" not in retained.columns:
     retained = pd.DataFrame({"Attorney": [], "PNCs who met and retained": []})
 
-# Build report
+# Build report (keep your structure)
 report = pd.DataFrame({"Attorney": list(ATTORNEY_TO_INITIALS.keys())})
 report["PNCs who met"] = report["Attorney"].map(lambda a: int(met_by_atty.get(a, 0)))
 ret_map = dict(zip(retained["Attorney"], retained["PNCs who met and retained"]))
@@ -1288,12 +1290,3 @@ with st.expander("Debug details (for reconciliation)", expanded=False):
         f"Total retained={row10} ({row11}%)"
     )
 
-# ───────────────────────────────────────────────────────────────────────────────
-# Quiet logs (optional)
-# ───────────────────────────────────────────────────────────────────────────────
-with st.expander("ℹ️ Logs (tech details)", expanded=False):
-    if st.session_state["logs"]:
-        for line in st.session_state["logs"]:
-            st.code(line)
-    else:
-        st.caption("No technical logs this session.")
