@@ -1112,9 +1112,18 @@ def _col_by_idx(df: pd.DataFrame, idx: int) -> str | None:
     return df.columns[idx] if (df is not None and not df.empty and idx < df.shape[1]) else None
 
 def _between_dates(s, start, end):
-    sd, ed = pd.to_datetime(start), pd.to_datetime(end)
+    # Normalize everything to midnight pandas Timestamps and compare
     x = pd.to_datetime(s, errors="coerce")
-    return (x.dt.date >= sd.date()) & (x.dt.date <= ed.date())
+    sd = pd.Timestamp(start)
+    ed = pd.Timestamp(end)
+    # Drop tz if present, then normalize to date (00:00:00)
+    try:
+        x = x.dt.tz_localize(None)
+    except Exception:
+        pass
+    x = x.dt.normalize()
+    return x.between(sd, ed, inclusive="both")
+
 
 # ============== PNCs who met with {Attorney} (IC + DM), per your rules ==========
 def _met_counts_from_ic_dm(df_ic: pd.DataFrame, df_dm: pd.DataFrame) -> pd.Series:
