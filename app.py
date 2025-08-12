@@ -1096,6 +1096,14 @@ PRACTICE_AREAS = {
 
 OTHER_ATTORNEYS = ["Robert Brown", "Justine Sennott", "Paul Abraham"]
 
+# --- ensure practice-area mapper exists (before we build the report) ---
+if "_practice_for" not in globals():
+    def _practice_for(name: str) -> str:
+        for pa, names in PRACTICE_AREAS.items():
+            if name in names:
+                return pa
+        return "Other"
+
 # ───────────────────────────────────────────────────────────────────────────────
 # Practice Area (robust counting + safe report build)
 # ───────────────────────────────────────────────────────────────────────────────
