@@ -274,7 +274,6 @@ def render_admin_sidebar():
                     m_end   = pd.Timestamp(year=year, month=month, day=last_day)
                     bs = pd.to_datetime(df["__batch_start"], errors="coerce")
                     be = pd.to_datetime(df["__batch_end"], errors="coerce")
-                    # keep rows that do NOT overlap the month
                     keep_mask = ~((bs <= m_end) & (be >= m_start))
                     before = len(df)
                     df2 = df.loc[keep_mask].copy()
@@ -307,14 +306,11 @@ def render_admin_sidebar():
                 has_mid  = df["__mid"].ne("")
                 no_mid   = ~has_mid
 
-                # With Matter ID: keep last occurrence of each ID
                 keep_mid = pd.Series(True, index=df.index)
                 if has_mid.any():
-                    # Keep the last occurrence -> dedupe keep='last'
                     keep_mid = ~df.loc[has_mid, "__mid"].duplicated(keep="last")
                     keep_mid = keep_mid.reindex(df.index, fill_value=False) | no_mid
 
-                # Without Matter ID: fallback composite key (older behavior)
                 subset_no_mid = df.loc[no_mid].copy()
                 if not subset_no_mid.empty:
                     k_nom = (
@@ -1115,12 +1111,11 @@ else:
 
 row10 = int(ncl_in.shape[0])
 
-# Scheduled = all IC + all DM (we do NOT exclude No Show here; that's for "showed up")
+# Scheduled = all IC + all DM
 row4 = int(init_in.shape[0] + disc_in.shape[0])
 
-# Showed up = subtract rows where Column I ("Status"/attendance) has a value in IC/DM
+# Showed up = subtract rows where Column I has any value (No Show / Canceled / etc.)
 def _not_show_mask(s: pd.Series) -> pd.Series:
-    # any non-empty in Column I indicates did-not-show (No Show / Canceled / trailing text)
     ss = s.astype(str)
     return ss.str.strip().ne("")
 
@@ -1152,7 +1147,6 @@ kpi_rows = [
     ("# of Total PNCs who retained", row10),
     ("% of total PNCs who retained", f"{row11}%"),
 ]
-
 table_rows = "\n".join(
     f"<tr><td>{_html_escape(k)}</td><td style='text-align:right'>{_html_escape(v)}</td></tr>"
     for k, v in kpi_rows
@@ -1224,10 +1218,10 @@ ALIASES = {
     "lukios":"Lukios Stefan","will":"William Gogoel","kevin":"Kevin Jaros",
     "watkins, connor":"Connor Watkins","fox, jennifer":"Jennifer Fox","megel, rebecca":"Rebecca Megel",
     "hill, adam":"Adam Hill","kerby, elias":"Elias Kerby","ross, elizabeth":"Elizabeth Ross",
-    "kizer, garrett":"Garrett Kizer","grabulis, kyle":"Kyle Grabulis","kravetz, sarah":"Sarah Kravetz",
+    "kizer, garrett":"Garrett Kizer","grabulis, kyle":"Kyle Grabulis","kravetz, s":"Sarah Kravetz","kravetz, sarah":"Sarah Kravetz",
     "suddarth, andrew":"Andrew Suddarth","bang, william":"William Bang","giaimo, bret":"Bret Giaimo",
-    "supernor, hannah":"Hannah Supernor","kouremetis, laura":"Laura Kouremetis","stefan, lukios":"Lukios Stefan",
-    "gogoel, william":"William Gogoel","jaros, kevin":"Kevin Jaros",
+    "supernor, hannah":"Hannah Supernor","kouremetis, laura":"Laura Kouremetis","stefan, l":"Lukios Stefan","stefan, lukios":"Lukios Stefan",
+    "gogoel, w":"William Gogoel","gogoel, william":"William Gogoel","jaros, kevin":"Kevin Jaros",
 }
 
 def _norm_name(raw: str) -> str:
@@ -1254,19 +1248,19 @@ def _norm_initials(x: str) -> str:
     # Treat 'c.w.', ' cw ', 'C W', 'cw' → 'CW'
     return re.sub(r"[^A-Z]", "", str(x or "").upper())
 
-# Initial_Consultation: include all in range; we will use Column I to derive show/no-show elsewhere
+# Initial_Consultation: keep all in range
 init_work = init_in.copy()
 if not init_work.empty:
     init_work["Lead Attorney"] = init_work.get("Lead Attorney","").astype(str).map(_norm_name)
 
-# Discovery_Meeting: exclude Sub Status == Follow Up; else keep
+# Discovery_Meeting: exclude only Follow Up
 disc_work = disc_in.copy()
 if not disc_work.empty:
     disc_work["Lead Attorney"] = disc_work.get("Lead Attorney","").astype(str).map(_norm_name)
     not_follow = ~disc_work.get("Sub Status","").astype(str).str.strip().str.lower().eq("follow up")
     disc_work = disc_work.loc[not_follow].copy()
 
-# Meetings per attorney = IC + DM (counts)
+# Meetings per attorney = IC + DM
 ic_counts = (init_work["Lead Attorney"].value_counts() if "Lead Attorney" in init_work.columns else pd.Series(dtype=int))
 dm_counts = (disc_work["Lead Attorney"].value_counts() if "Lead Attorney" in disc_work.columns else pd.Series(dtype=int))
 meet = pd.concat([ic_counts.rename("IC"), dm_counts.rename("DM")], axis=1).fillna(0)
@@ -1286,30 +1280,35 @@ for cand in ["Retained With Consult (Y/N)", "Retained with Consult (Y/N)"]:
         retained_flag_col = cand; break
 
 def _retained_counts(ncl_slice: pd.DataFrame) -> pd.DataFrame:
+    # Always return a 2-col DataFrame with exact schema
+    schema = ["Attorney", "PNCs who met and retained"]
     if ncl_slice.empty or retained_flag_col is None:
-        return pd.DataFrame({"Attorney": [], "PNCs who met and retained": []})
+        return pd.DataFrame(columns=schema)
+
     flag = ncl_slice[retained_flag_col].astype(str).str.strip().str.upper()
     kept = ncl_slice.loc[flag != "N"].copy()
     if kept.empty:
-        return pd.DataFrame({"Attorney": [], "PNCs who met and retained": []})
+        return pd.DataFrame(columns=schema)
 
     # Choose initials source (Responsible Attorney preferred, else Atty Initials if present)
     initials_col = "Responsible Attorney" if "Responsible Attorney" in kept.columns else ("Atty Initials" if "Atty Initials" in kept.columns else None)
     if initials_col is None:
-        return pd.DataFrame({"Attorney": [], "PNCs who met and retained": []})
+        return pd.DataFrame(columns=schema)
 
     kept["_ini"] = kept[initials_col].map(_norm_initials)
     kept["_att"] = kept["_ini"].map(lambda ini: INITIALS_TO_ATTORNEY.get(ini, "Other"))
-    out = (kept["_att"]
-           .value_counts()
-           .rename("PNCs who met and retained")
-           .reset_index()
-           .rename(columns={"index":"Attorney"}))
+    out = kept["_att"].value_counts(dropna=False)
+    out = out.rename("PNCs who met and retained").reset_index().rename(columns={"index":"Attorney"})
+
+    # Enforce schema and dtypes
+    out = out.reindex(columns=schema)
+    out["Attorney"] = out["Attorney"].astype(str)
+    out["PNCs who met and retained"] = pd.to_numeric(out["PNCs who met and retained"], errors="coerce").fillna(0).astype(int)
     return out
 
 retained = _retained_counts(ncl_in)
-if retained.empty:
-    retained = pd.DataFrame({"Attorney": [], "PNCs who met and retained": []})
+# Final safety: ensure columns exist even if something unexpected happens
+retained = retained.reindex(columns=["Attorney", "PNCs who met and retained"])
 
 # Merge & compute percentage (Row 3 = retained ÷ # of PNCs from first block)
 report = meet.merge(retained, on="Attorney", how="left").fillna({"PNCs who met and retained": 0})
