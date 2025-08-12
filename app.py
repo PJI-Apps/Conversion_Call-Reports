@@ -1096,77 +1096,29 @@ PRACTICE_AREAS = {
 
 OTHER_ATTORNEYS = ["Robert Brown", "Justine Sennott", "Paul Abraham"]
 
-ATTORNEY_TO_INITIALS = {
-    "Connor Watkins": "CW","Jennifer Fox": "JF","Rebecca Megel": "RM",
-    "Adam Hill": "AH","Elias Kerby": "EK","Elizabeth Ross": "ER",
-    "Garrett Kizer": "GK","Kyle Grabulis": "KG","Sarah Kravetz": "SK",
-    "Andrew Suddarth": "AS","William Bang": "WB","Bret Giaimo": "BG",
-    "Hannah Supernor": "HS","Laura Kouremetis": "LK","Lukios Stefan": "LS",
-    "William Gogoel": "WG","Kevin Jaros": "KJ",
-    # NEW Estate Administration
-    "Jamie Kliem": "JK","Carter McClain": "CM",
-    # Explicit “Other”
-    "Robert Brown": "RB","Justine Sennott": "JS","Paul Abraham": "PA",
-}
-INITIALS_TO_ATTORNEY = {v: k for k, v in ATTORNEY_TO_INITIALS.items()}
+# ───────────────────────────────────────────────────────────────────────────────
+# Practice Area (robust counting + safe report build)
+# ───────────────────────────────────────────────────────────────────────────────
 
+# Friendly display overrides (define if missing)
+if "DISPLAY_NAME_OVERRIDES" not in globals():
+    DISPLAY_NAME_OVERRIDES = {
+        "Elias Kerby": "Eli Kerby",
+        "William Bang": "Billy Bang",
+        "William Gogoel": "Will Gogoel",
+        "Andrew Suddarth": "Andy Suddarth",
+    }
 
-def _display(n: str) -> str:
-    return DISPLAY_NAME_OVERRIDES.get(n, n)
-
-def _practice_for(name: str) -> str:
-    for pa, names in PRACTICE_AREAS.items():
-        if name in names: return pa
-    return "Other"
-
-# Helpers (by index; A=0 … L=11, M=12, P=15)
-def _col_by_idx(df: pd.DataFrame, idx: int) -> str | None:
-    return df.columns[idx] if (isinstance(df, pd.DataFrame) and not df.empty and idx < df.shape[1]) else None
-
-def _between_dates(s, start, end):
-    x = pd.to_datetime(s, errors="coerce")
-    try: x = x.dt.tz_localize(None)
-    except Exception: pass
-    x = x.dt.normalize()
-    return x.between(pd.Timestamp(start), pd.Timestamp(end), inclusive="both")
-
-# ---------- Accurate counts (by column names, no indexes) ----------
-
-DISPLAY_NAME_OVERRIDES = {
-    "Elias Kerby": "Eli Kerby",
-    "William Bang": "Billy Bang",
-    "William Gogoel": "Will Gogoel",
-    "Andrew Suddarth": "Andy Suddarth",
-}
 def _display_safe(n: str) -> str:
     return DISPLAY_NAME_OVERRIDES.get(n, n)
 
-# Canonical roster = all PAs + explicit "Other" names, preserving order
+# Canonical roster in a stable order
 CANON = list(dict.fromkeys(sum(PRACTICE_AREAS.values(), []) + OTHER_ATTORNEYS))
 
-# NCL initials → full names
-INITIALS_TO_ATTORNEY = {
-    "CW":"Connor Watkins","JF":"Jennifer Fox","RM":"Rebecca Megel",
-    "AH":"Adam Hill","EK":"Elias Kerby","ER":"Elizabeth Ross",
-    "GK":"Garrett Kizer","KG":"Kyle Grabulis","SK":"Sarah Kravetz",
-    "AS":"Andrew Suddarth","WB":"William Bang","BG":"Bret Giaimo",
-    "HS":"Hannah Supernor","LK":"Laura Kouremetis","LS":"Lukios Stefan",
-    "WG":"William Gogoel","KJ":"Kevin Jaros",
-    # New Estate Administration
-    "JK":"Jamie Kliem","CM":"Carter McClain",
-    # Explicit Other
-    "RB":"Robert Brown","JS":"Justine Sennott","PA":"Paul Abraham",
-}
-
-# ---------- Robust, fuzzy-matched counts with resilient datetime parsing ----------
-
+# ---------- Fuzzy column matching + resilient datetime parsing ----------
 import re
 
 def _col_fuzzy(df: pd.DataFrame, patterns: list[str]) -> str | None:
-    """
-    Return the first column whose normalized name contains ALL pattern tokens.
-    Normalization: lower, strip, collapse spaces, drop punctuation.
-    """
     if df is None or df.empty:
         return None
     def norm(s: str) -> str:
@@ -1174,30 +1126,26 @@ def _col_fuzzy(df: pd.DataFrame, patterns: list[str]) -> str | None:
         s = re.sub(r"[\s_]+", " ", s)
         s = re.sub(r"[^a-z0-9 ]", "", s)
         return s
-    target_tokens = [norm(p) for p in patterns if p and str(p).strip()]
+    tgt = [norm(p) for p in patterns if p and str(p).strip()]
     cols_norm = {c: norm(c) for c in df.columns}
     for c, n in cols_norm.items():
-        if all(tok in n for tok in target_tokens):
+        if all(tok in n for tok in tgt):
             return c
     return None
 
-# Clean DM/IC datetime strings like "08/06/2025 at 12:45pm EDT"
 _TZ_RE = re.compile(r"\s+(ET|EDT|EST|CT|CDT|CST|MT|MDT|MST|PT|PDT)\b", flags=re.I)
 def _clean_dt_text(x: str) -> str:
-    if x is None:
-        return ""
+    if x is None: return ""
     s = str(x).strip()
-    s = re.sub(r"\s+at\s+", " ", s, flags=re.I)   # " at " -> " "
-    s = _TZ_RE.sub("", s)                         # drop trailing timezone word
+    s = re.sub(r"\s+at\s+", " ", s, flags=re.I)  # " at " -> space
+    s = _TZ_RE.sub("", s)                        # drop timezone token
     return s
 
 def _to_ts(series: pd.Series) -> pd.Series:
     s = series.astype(str).map(_clean_dt_text)
     x = pd.to_datetime(s, errors="coerce", infer_datetime_format=True)
-    try:
-        x = x.dt.tz_localize(None)
-    except Exception:
-        pass
+    try: x = x.dt.tz_localize(None)
+    except Exception: pass
     return x
 
 def _between_inclusive(series: pd.Series, sd, ed) -> pd.Series:
@@ -1208,7 +1156,7 @@ def _is_blank(series: pd.Series) -> pd.Series:
     s = series.astype(str)
     return series.isna() | (s.str.strip() == "") | (s.str.lower().isin(["nan","none","na","null"]))
 
-# Map NCL initials → full names (your canon, incl. JK/CM and Other)
+# NCL initials → full names (includes JK/CM and Other)
 INITIALS_TO_ATTORNEY = {
     "CW":"Connor Watkins","JF":"Jennifer Fox","RM":"Rebecca Megel",
     "AH":"Adam Hill","EK":"Elias Kerby","ER":"Elizabeth Ross",
@@ -1220,66 +1168,50 @@ INITIALS_TO_ATTORNEY = {
     "RB":"Robert Brown","JS":"Justine Sennott","PA":"Paul Abraham",
 }
 
+# ---------- Robust counters (operate on RAW sheets; do their own date filtering) ----------
 def _met_counts_from_ic_dm_fuzzy(ic_df: pd.DataFrame, dm_df: pd.DataFrame, sd, ed) -> dict:
-    """
-    Count 'PNCs who met' per attorney from IC + DM using fuzzy column detection and resilient datetime parsing.
-    Rules:
-      • Attorney full name from a 'Lead Attorney' column
-      • Date in range: IC "Initial Consultation With Pji Law", DM "Discovery Meeting With Pji Law"
-      • EXCLUDE Sub Status == 'Follow Up'
-      • EXCLUDE non-blank Reason for Rescheduling
-    """
+    """PNCs who met with {Attorney} from IC+DM: fuzzy headers, include in-range; exclude Follow Up + non-blank Reason."""
     buckets = []
 
-    # ---- IC (Initial Consultation) ----
+    # IC
     if isinstance(ic_df, pd.DataFrame) and not ic_df.empty:
-        att  = _col_fuzzy(ic_df, ["lead", "attorney"])  # e.g., "Lead Attorney"
-        date = _col_fuzzy(ic_df, ["initial", "consultation"])  # "Initial Consultation With Pji Law"
-        sub  = _col_fuzzy(ic_df, ["sub", "status"])            # "Sub Status"
-        rsn  = _col_fuzzy(ic_df, ["reason", "resched"])        # "Reason for Rescheduling"
+        att  = _col_fuzzy(ic_df, ["lead","attorney"])
+        date = _col_fuzzy(ic_df, ["initial","consultation"])
+        sub  = _col_fuzzy(ic_df, ["sub","status"])
+        rsn  = _col_fuzzy(ic_df, ["reason","resched"])
         if att and date:
             t = ic_df.copy()
             m = _between_inclusive(t[date], sd, ed)
-            if sub is not None:
-                m &= ~t[sub].astype(str).str.strip().str.lower().eq("follow up")
-            if rsn is not None:
-                m &= _is_blank(t[rsn])
+            if sub is not None: m &= ~t[sub].astype(str).str.strip().str.lower().eq("follow up")
+            if rsn is not None: m &= _is_blank(t[rsn])
             buckets.append(t.loc[m, att].astype(str).str.strip())
 
-    # ---- DM (Discovery Meeting) ----
+    # DM
     if isinstance(dm_df, pd.DataFrame) and not dm_df.empty:
-        att  = _col_fuzzy(dm_df, ["lead", "attorney"])         # "Lead Attorney"
-        date = _col_fuzzy(dm_df, ["discovery", "meeting"])     # "Discovery Meeting With Pji Law"
-        sub  = _col_fuzzy(dm_df, ["sub", "status"])            # "Sub Status"
-        rsn  = _col_fuzzy(dm_df, ["reason", "resched"])        # "Reason for Rescheduling"
+        att  = _col_fuzzy(dm_df, ["lead","attorney"])
+        date = _col_fuzzy(dm_df, ["discovery","meeting"])
+        sub  = _col_fuzzy(dm_df, ["sub","status"])
+        rsn  = _col_fuzzy(dm_df, ["reason","resched"])
         if att and date:
             t = dm_df.copy()
             m = _between_inclusive(t[date], sd, ed)
-            if sub is not None:
-                m &= ~t[sub].astype(str).str.strip().str.lower().eq("follow up")
-            if rsn is not None:
-                m &= _is_blank(t[rsn])
+            if sub is not None: m &= ~t[sub].astype(str).str.strip().str.lower().eq("follow up")
+            if rsn is not None: m &= _is_blank(t[rsn])
             buckets.append(t.loc[m, att].astype(str).str.strip())
 
     if not buckets:
         return {}
-
     met_series = pd.concat(buckets, ignore_index=True)
     met_series = met_series[met_series.ne("")]
     return met_series.value_counts(dropna=False).to_dict()
 
 def _retained_counts_from_ncl_fuzzy(ncl_df: pd.DataFrame, sd, ed) -> dict:
-    """
-    Count 'PNCs who met & retained' from NCL using fuzzy columns and resilient datetime parsing.
-      • initials → full names via INITIALS_TO_ATTORNEY (unknown → 'Other')
-      • 'Retained With Consult (Y/N)' != 'N'
-      • date ∈ [sd, ed] on 'Date we had BOTH the signed CLA and full payment'
-    """
+    """PNCs who met & retained from NCL: fuzzy headers; F != 'N'; G in range; initials → full names (unknown→Other)."""
     if not isinstance(ncl_df, pd.DataFrame) or ncl_df.empty:
         return {}
-    init_col = _col_fuzzy(ncl_df, ["responsible", "attorney"])
-    flag_col = _col_fuzzy(ncl_df, ["retained", "consult"])
-    date_col = _col_fuzzy(ncl_df, ["date", "signed", "payment"])
+    init_col = _col_fuzzy(ncl_df, ["responsible","attorney"])
+    flag_col = _col_fuzzy(ncl_df, ["retained","consult"])
+    date_col = _col_fuzzy(ncl_df, ["date","signed","payment"])
     if not (init_col and flag_col and date_col):
         return {}
 
@@ -1287,7 +1219,6 @@ def _retained_counts_from_ncl_fuzzy(ncl_df: pd.DataFrame, sd, ed) -> dict:
     m = _between_inclusive(t[date_col], sd, ed)
     m &= t[flag_col].astype(str).str.strip().str.upper().ne("N")
 
-    # normalize initials to A-Z only, then map
     mapped = (
         t.loc[m, init_col]
          .astype(str).str.upper()
@@ -1295,22 +1226,35 @@ def _retained_counts_from_ncl_fuzzy(ncl_df: pd.DataFrame, sd, ed) -> dict:
     )
     return mapped.value_counts(dropna=False).to_dict()
 
-# ---- Build counts from the RAW sheets (df_init/df_disc/df_ncl) with our own robust filtering ----
-_met_counts = _met_counts_from_ic_dm_fuzzy(df_init, df_disc, start_date, end_date)
-_ret_counts = _retained_counts_from_ncl_fuzzy(df_ncl, start_date, end_date)
+# ---------- Build counts + report safely ----------
+try:
+    _met_counts = _met_counts_from_ic_dm_fuzzy(df_init, df_disc, start_date, end_date)
+    _ret_counts = _retained_counts_from_ncl_fuzzy(df_ncl, start_date, end_date)
 
-# Canonical roster (keep your existing lists)
-CANON = list(dict.fromkeys(sum(PRACTICE_AREAS.values(), []) + OTHER_ATTORNEYS))
+    met_by_attorney      = {name: int(_met_counts.get(name, 0)) for name in CANON}
+    retained_by_attorney = {name: int(_ret_counts.get(name, 0)) for name in CANON}
 
-met_by_attorney      = {name: int(_met_counts.get(name, 0)) for name in CANON}
-retained_by_attorney = {name: int(_ret_counts.get(name, 0)) for name in CANON}
+    report = pd.DataFrame({"Attorney": CANON})
+    report["PNCs who met"] = report["Attorney"].map(lambda a: met_by_attorney.get(a, 0))
+    report["PNCs who met and retained"] = report["Attorney"].map(lambda a: retained_by_attorney.get(a, 0))
+    report["Practice Area"] = report["Attorney"].map(_practice_for)
+    report["Attorney_Display"] = report["Attorney"].map(_display_safe)
 
-# ---------- Render (percent = retained / met, not retained / total PNCs) ----------
+except Exception as e:
+    st.error("Practice Area: failed to build counts/report.")
+    st.exception(e)
+    # ensure 'report' exists to avoid NameError downstream
+    report = pd.DataFrame({"Attorney": CANON, "PNCs who met": 0, "PNCs who met and retained": 0,
+                           "Practice Area": [ _practice_for(a) for a in CANON ],
+                           "Attorney_Display": [ _display_safe(a) for a in CANON ]})
+
+# ---------- Render (percent = retained / met) ----------
 def _render_three_row_card(title_name: str, met: int, kept: int):
-    pct = 0.0 if int(met) == 0 else round((int(kept) / int(met)) * 100.0, 2)
+    met_i = int(met); kept_i = int(kept)
+    pct = 0.0 if met_i == 0 else round((kept_i / met_i) * 100.0, 2)
     rows = [
-        (f"PNCs who met with {title_name}", f"{int(met)}"),
-        (f"PNCs who met with {title_name} and retained", f"{int(kept)}"),
+        (f"PNCs who met with {title_name}", f"{met_i}"),
+        (f"PNCs who met with {title_name} and retained", f"{kept_i}"),
         (f"% of PNCs who met with {title_name} and retained", f"{pct:.2f}%"),
     ]
     trs = "\n".join(
@@ -1347,6 +1291,7 @@ for pa in ["Estate Planning","Estate Administration","Civil Litigation","Busines
                 int(rowx["PNCs who met"]),
                 int(rowx["PNCs who met and retained"]),
             )
+
 
 # ───────────────────────────────────────────────────────────────────────────────
 # Debug details
