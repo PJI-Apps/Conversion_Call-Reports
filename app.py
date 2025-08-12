@@ -1182,41 +1182,88 @@ def _is_blank(series: pd.Series) -> pd.Series:
     s = series.astype(str)
     return series.isna() | (s.str.strip() == "") | (s.str.lower().isin(["nan","none"]))
 
-def _met_counts_from_ic_dm_named(ic_df: pd.DataFrame, dm_df: pd.DataFrame) -> dict:
-    parts = []
+# ---------- Robust, name-based counts that do their own date filtering ----------
 
-    # Initial Consultation
+def _to_ts(series: pd.Series) -> pd.Series:
+    x = pd.to_datetime(series, errors="coerce", utc=False, infer_datetime_format=True)
+    # if tz-aware, drop tz to compare safely
+    try:
+        x = x.dt.tz_localize(None)
+    except Exception:
+        pass
+    return x
+
+def _between_inclusive(series: pd.Series, sd, ed) -> pd.Series:
+    # normalize to timestamps and compare inclusive
+    x = _to_ts(series)
+    return (x >= pd.Timestamp(sd)) & (x <= pd.Timestamp(ed))
+
+def _col(df: pd.DataFrame, candidates: list[str]) -> str | None:
+    if df is None or df.empty: return None
+    by_lower = {c.lower().strip(): c for c in df.columns}
+    for cand in candidates:
+        k = cand.lower().strip()
+        if k in by_lower: return by_lower[k]
+    return None
+
+def _is_blank(series: pd.Series) -> pd.Series:
+    s = series.astype(str)
+    return series.isna() | (s.str.strip() == "") | (s.str.lower().isin(["nan","none","na","null"]))
+
+def _met_counts_from_ic_dm_robust(ic_df: pd.DataFrame, dm_df: pd.DataFrame, sd, ed) -> dict:
+    """
+    PNCs who met with {Attorney} (IC + DM), with robust in-function date filtering:
+      • IC:  Lead Attorney (L) + Initial Consultation With Pji Law (M)
+      • DM:  Lead Attorney (L) + Discovery Meeting With Pji Law (P)
+      • Exclude Sub Status == 'Follow Up'
+      • Exclude non-blank Reason for Rescheduling (no-shows/rescheduled)
+    """
+    buckets = []
+
+    # IC
     if isinstance(ic_df, pd.DataFrame) and not ic_df.empty:
-        att = _col(ic_df, ["Lead Attorney","Lead atty","Attorney"])
-        sub = _col(ic_df, ["Sub Status"])
-        reason = _col(ic_df, ["Reason for Rescheduling","Reason"])
-        if att:
+        att  = _col(ic_df, ["Lead Attorney","Lead atty","Attorney"])
+        date = _col(ic_df, ["Initial Consultation With Pji Law"])
+        sub  = _col(ic_df, ["Sub Status"])
+        rsn  = _col(ic_df, ["Reason for Rescheduling","Reason"])
+        if att and date:
             t = ic_df.copy()
-            m = pd.Series(True, index=t.index)
-            if sub:    m &= ~t[sub].astype(str).str.strip().str.lower().eq("follow up")
-            if reason: m &= _is_blank(t[reason])
-            parts.append(t.loc[m, att].astype(str).str.strip())
+            m = _between_inclusive(t[date], sd, ed)
+            if sub is not None:
+                m &= ~t[sub].astype(str).str.strip().str.lower().eq("follow up")
+            if rsn is not None:
+                m &= _is_blank(t[rsn])
+            buckets.append(t.loc[m, att].astype(str).str.strip())
 
-    # Discovery Meeting
+    # DM
     if isinstance(dm_df, pd.DataFrame) and not dm_df.empty:
-        att = _col(dm_df, ["Lead Attorney","Lead atty","Attorney"])
-        sub = _col(dm_df, ["Sub Status"])
-        reason = _col(dm_df, ["Reason for Rescheduling","Reason"])
-        if att:
+        att  = _col(dm_df, ["Lead Attorney","Lead atty","Attorney"])
+        date = _col(dm_df, ["Discovery Meeting With Pji Law"])
+        sub  = _col(dm_df, ["Sub Status"])
+        rsn  = _col(dm_df, ["Reason for Rescheduling","Reason"])
+        if att and date:
             t = dm_df.copy()
-            m = pd.Series(True, index=t.index)
-            if sub:    m &= ~t[sub].astype(str).str.strip().str.lower().eq("follow up")
-            if reason: m &= _is_blank(t[reason])
-            parts.append(t.loc[m, att].astype(str).str.strip())
+            m = _between_inclusive(t[date], sd, ed)
+            if sub is not None:
+                m &= ~t[sub].astype(str).str.strip().str.lower().eq("follow up")
+            if rsn is not None:
+                m &= _is_blank(t[rsn])
+            buckets.append(t.loc[m, att].astype(str).str.strip())
 
-    if not parts:
+    if not buckets:
         return {}
 
-    met_series = pd.concat(parts, ignore_index=True)
+    met_series = pd.concat(buckets, ignore_index=True)
     met_series = met_series[met_series.ne("")]
     return met_series.value_counts(dropna=False).to_dict()
 
-def _retained_counts_from_ncl_named(ncl_df: pd.DataFrame) -> dict:
+def _retained_counts_from_ncl_named(ncl_df: pd.DataFrame, sd, ed) -> dict:
+    """
+    PNCs who met & retained from NCL:
+      • Responsible Attorney initials → full name
+      • Retained With Consult (Y/N) != 'N'
+      • Date we had BOTH the signed CLA and full payment ∈ [sd, ed]
+    """
     if not isinstance(ncl_df, pd.DataFrame) or ncl_df.empty: return {}
     init_col = _col(ncl_df, ["Responsible Attorney"])
     flag_col = _col(ncl_df, ["Retained With Consult (Y/N)"])
@@ -1224,17 +1271,22 @@ def _retained_counts_from_ncl_named(ncl_df: pd.DataFrame) -> dict:
     if not (init_col and flag_col and date_col): return {}
 
     t = ncl_df.copy()
-    # ncl_in is already date-filtered by your Conversion Report, so we just apply the flag here
-    mask = t[flag_col].astype(str).str.strip().str.upper().ne("N")
-    mapped = t.loc[mask, init_col].map(_ini_to_full)
+    m = _between_inclusive(t[date_col], sd, ed)
+    m &= t[flag_col].astype(str).str.strip().str.upper().ne("N")
+
+    mapped = t.loc[m, init_col].astype(str).str.upper().map(lambda s: INITIALS_TO_ATTORNEY.get(re.sub(r"[^A-Z]", "", s), "Other"))
     return mapped.value_counts(dropna=False).to_dict()
 
-# Use your already date-filtered slices: init_in, disc_in, ncl_in
-_met_counts = _met_counts_from_ic_dm_named(init_in, disc_in)
-_ret_counts = _retained_counts_from_ncl_named(ncl_in)
+# Build counts directly from raw sheets with robust date filtering
+_met_counts = _met_counts_from_ic_dm_robust(df_init, df_disc, start_date, end_date)
+_ret_counts = _retained_counts_from_ncl_named(df_ncl, start_date, end_date)
+
+# Canonical roster (keep as you already defined earlier)
+CANON = list(dict.fromkeys(sum(PRACTICE_AREAS.values(), []) + OTHER_ATTORNEYS))
 
 met_by_attorney      = {name: int(_met_counts.get(name, 0)) for name in CANON}
 retained_by_attorney = {name: int(_ret_counts.get(name, 0)) for name in CANON}
+
 
 # ---------- Audit helper for why "met" looks low ----------
 def _col(df: pd.DataFrame, candidates: list[str]) -> str | None:
