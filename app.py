@@ -871,6 +871,7 @@ def _years_from(*dfs_cols):
         if df is not None and not df.empty and col in df.columns:
             ys |= set(pd.to_datetime(df[col], errors="coerce").dt.year.dropna().astype(int))
     return ys
+
 years_detected = _years_from(
     (df_ncl,  "Date we had BOTH the signed CLA and full payment"),
     (df_init, "Initial Consultation With Pji Law"),
@@ -887,9 +888,12 @@ with row[0]:
 with row[1]:
     sel_year_conv = st.selectbox("Year", years_conv, index=len(years_conv)-1)
 with row[2]:
-    sel_month_num = st.selectbox("Month", month_nums,
-                                 index=date.today().month-1,
-                                 format_func=lambda m: months_map_names[m])
+    sel_month_num = st.selectbox(
+        "Month",
+        month_nums,
+        index=date.today().month-1,
+        format_func=lambda m: months_map_names[m]
+    )
 
 week_defs = None
 sel_week_idx = 0
@@ -931,15 +935,16 @@ else:
 
 st.caption(f"Showing Conversion metrics for **{start_date:%-d %b %Y} → {end_date:%-d %b %Y}**")
 
-# Filtered slices
+# Filtered slices (date-in-range only; column names are fixed by your files)
 init_mask = _mask_by_range_dates(df_init, "Initial Consultation With Pji Law", start_date, end_date)
 disc_mask = _mask_by_range_dates(df_disc, "Discovery Meeting With Pji Law", start_date, end_date)
 ncl_mask  = _mask_by_range_dates(df_ncl,  "Date we had BOTH the signed CLA and full payment", start_date, end_date)
+
 init_in = df_init.loc[init_mask].copy() if not df_init.empty else pd.DataFrame()
 disc_in = df_disc.loc[disc_mask].copy() if not df_disc.empty else pd.DataFrame()
 ncl_in  = df_ncl.loc[ncl_mask].copy()  if not df_ncl.empty  else pd.DataFrame()
 
-# Leads & PNCs — batch period overlap
+# Leads & PNCs — batch period overlap (unchanged)
 if not df_leads.empty and {"__batch_start","__batch_end"} <= set(df_leads.columns):
     bs = pd.to_datetime(df_leads["__batch_start"], errors="coerce")
     be = pd.to_datetime(df_leads["__batch_end"],   errors="coerce")
@@ -979,35 +984,39 @@ def _find_col(df: pd.DataFrame, candidates: list[str]) -> Optional[str]:
         if k in cols: return cols[k]
     return None
 
-# === FIXED: IC/DM scheduled & showed ===
-# Scheduled (exclude Sub Status == 'Follow Up'); Met-with = Scheduled MINUS any non-empty value in Column I (Reason for Rescheduling)
-def _scheduled_and_showed(df: pd.DataFrame, substatus_colname: Optional[str]) -> Tuple[int, int]:
+# === SCHEDULED & MET (exact to your rules) ===
+def _scheduled_and_met(df: pd.DataFrame) -> Tuple[int, int]:
+    """
+    Scheduled = rows in-range (we already passed an in-range slice) MINUS only Sub Status == 'Follow Up'
+    Met       = Scheduled MINUS rows where Column I (Reason for Rescheduling) is non-blank
+    """
     if df is None or df.empty:
         return 0, 0
 
-    # Exclude 'Follow Up'
-    sub_col = substatus_colname if (substatus_colname and substatus_colname in df.columns) else _find_col(df, ["Sub Status"])
-    scheduled_df = df.copy()
-    if sub_col and sub_col in scheduled_df.columns:
-        scheduled_df = scheduled_df.loc[~scheduled_df[sub_col].astype(str).str.strip().str.lower().eq("follow up")].copy()
+    # Exclude Follow Up (Column G = 'Sub Status')
+    sub_col = _find_col(df, ["Sub Status"])
+    in_scope = df.copy()
+    if sub_col and sub_col in in_scope.columns:
+        in_scope = in_scope.loc[~in_scope[sub_col].astype(str).str.strip().str.lower().eq("follow up")].copy()
 
-    scheduled = int(len(scheduled_df))
+    scheduled = int(len(in_scope))
 
-    # Prefer the named Column I; fallback to physical 9th column (index 8)
-    reason_col = _find_col(scheduled_df, ["Reason for Rescheduling"]) or (scheduled_df.columns[8] if scheduled_df.shape[1] >= 9 else None)
+    # Column I (Reason for Rescheduling) — treat real blanks, NaN, and whitespace as blank
+    reason_col = _find_col(in_scope, ["Reason for Rescheduling"]) or (in_scope.columns[8] if in_scope.shape[1] >= 9 else None)
     if reason_col:
-        non_show_mask = scheduled_df[reason_col].astype(str).fillna("").str.strip().ne("")
+        vals = in_scope[reason_col]
+        non_blank = vals.notna() & vals.astype(str).str.strip().ne("")
     else:
-        non_show_mask = pd.Series(False, index=scheduled_df.index)
+        non_blank = pd.Series(False, index=in_scope.index)
 
-    showed = int((~non_show_mask).sum())
-    return scheduled, showed
+    met = int((~non_blank).sum())
+    return scheduled, met
 
-# Compute scheduled/showed for IC and DM (using the corrected function)
-ic_sched, ic_show = _scheduled_and_showed(init_in, "Sub Status")
-dm_sched, dm_show = _scheduled_and_showed(disc_in, "Sub Status")
+# Compute scheduled/met for IC and DM
+ic_sched, ic_met = _scheduled_and_met(init_in)
+dm_sched, dm_met = _scheduled_and_met(disc_in)
 
-# NCL retained split within range
+# NCL retained split within range (unchanged)
 ncl_flag_col = None
 for candidate in ["Retained With Consult (Y/N)", "Retained with Consult (Y/N)"]:
     if candidate in ncl_in.columns:
@@ -1023,7 +1032,7 @@ else:
 
 row10 = int(ncl_in.shape[0])                     # total retained
 row4  = int(ic_sched + dm_sched)                 # scheduled consultations
-row6  = int(ic_show  + dm_show)                  # showed up to consultations
+row6  = int(ic_met   + dm_met)                   # met (showed) consultations
 
 def _pct(numer, denom): return 0 if (denom is None or denom == 0) else round((numer/denom)*100)
 
