@@ -999,7 +999,7 @@ disc_sched = disc_in.loc[_ok_meeting_status(disc_in.get("Status","")) &
                          ~disc_in.get("Sub Status","").astype(str).str.strip().str.lower().eq("follow up")]
 row4 = int(init_sched.shape[0] + disc_sched.shape[0])
 
-# Showed up for consultation (treat Status in {PNC, Hired} as showed)
+# Showed up for consultation (count Status in {PNC, Hired})
 def _showed(series: pd.Series) -> pd.Series:
     v = series.astype(str).str.strip().str.lower()
     return v.isin({"pnc","hired"})
@@ -1038,6 +1038,9 @@ html_table = f"""
 .kpi-table {{ width: 100%; border-collapse: collapse; font-size: 0.95rem; }}
 .kpi-table th, .kpi-table td {{ border: 1px solid #eee; padding: 10px 12px; }}
 .kpi-table th {{ background: #fafafa; text-align: left; font-weight: 600; }}
+.mini-kpi-table {{ width: 100%; border-collapse: collapse; font-size: 0.95rem; margin-top: .5rem; }}
+.mini-kpi-table th, .mini-kpi-table td {{ border: 1px solid #eee; padding: 8px 10px; }}
+.mini-kpi-table th {{ background: #fafafa; text-align: left; font-weight: 600; }}
 </style>
 <table class="kpi-table">
   <thead><tr><th>Metric</th><th>Value</th></tr></thead>
@@ -1048,7 +1051,6 @@ html_table = f"""
 """
 st.markdown(html_table, unsafe_allow_html=True)
 
-# Optional: show reconciliation numbers
 with st.expander("Debug details (for reconciliation)", expanded=False):
     st.write("IC rows in range:", len(init_in), " → counted as scheduled:", len(init_sched))
     st.write("DM rows in range:", len(disc_in), " → counted as scheduled:", len(disc_sched))
@@ -1056,7 +1058,7 @@ with st.expander("Debug details (for reconciliation)", expanded=False):
         st.write("New Client List — Retained split (in range)", ncl_in[ncl_flag_col].value_counts(dropna=False))
 
 # ───────────────────────────────────────────────────────────────────────────────
-# Conversion → Practice Area (static tables, no sorting)
+# Conversion → Practice Area (STATIC HTML tables, unsortable, no index column)
 # ───────────────────────────────────────────────────────────────────────────────
 st.subheader("Practice Area")
 
@@ -1146,7 +1148,9 @@ meet = meet.reset_index().rename(columns={"index":"Attorney"})
 all_configured = sorted(set(sum(PRACTICE_AREAS.values(), [])))
 if "Attorney" not in meet.columns:
     meet = pd.DataFrame(columns=["Attorney","IC","DM","PNCs who met"])
-meet = pd.DataFrame({"Attorney": all_configured}).merge(meet, on="Attorney", how="left").fillna({"IC":0,"DM":0,"PNCs who met":0})
+meet = pd.DataFrame({"Attorney": all_configured}).merge(meet, on="Attorney", how="left")
+for c in ["IC","DM","PNCs who met"]:
+    meet[c] = pd.to_numeric(meet.get(c, 0), errors="coerce").fillna(0).astype(int)
 
 # Retained per attorney (NCL): use initials in Responsible Attorney (preferred) or Atty Initials
 retained_flag_col = None
@@ -1176,6 +1180,8 @@ def _retained_counts(ncl_slice: pd.DataFrame) -> pd.DataFrame:
 retained = _retained_counts(ncl_in)
 if "Attorney" not in getattr(retained, "columns", []):
     retained = pd.DataFrame(columns=["Attorney","PNCs who met and retained"])
+else:
+    retained["PNCs who met and retained"] = pd.to_numeric(retained["PNCs who met and retained"], errors="coerce").fillna(0).astype(int)
 
 # Merge & compute percentage
 report = meet.merge(retained, on="Attorney", how="left").fillna({"PNCs who met and retained": 0})
@@ -1184,54 +1190,56 @@ report["Attorney_Display"] = report["Attorney"].map(_display)
 
 denom_pncs = int(row2) if isinstance(row2, (int, float)) else 0
 report["% of PNCs who met and retained"] = report.apply(
-    lambda r: 0.0 if denom_pncs == 0 else round((r["PNCs who met and retained"] / denom_pncs) * 100.0, 2),
+    lambda r: 0.0 if denom_pncs == 0 else round((int(r["PNCs who met and retained"]) / denom_pncs) * 100.0, 2),
     axis=1
 )
 
-# UI: one expander per practice area (STATIC tables; unsortable; no left index)
+def _mini_table_html(title_name: str, met: int, met_ret: int, pct: float) -> str:
+    rows = [
+        (f"PNCs who met with {title_name}", f"{met}"),
+        (f"PNCs who met with {title_name} and retained", f"{met_ret}"),
+        (f"% of PNCs who met with {title_name} and retained", f"{pct:.2f}%"),
+    ]
+    body = "\n".join(
+        f"<tr><td>{_html_escape(k)}</td><td style='text-align:right'>{_html_escape(v)}</td></tr>"
+        for k, v in rows
+    )
+    return f"""
+    <table class="mini-kpi-table">
+      <thead><tr><th>Metric</th><th>Value</th></tr></thead>
+      <tbody>
+        {body}
+      </tbody>
+    </table>
+    """
+
+# UI: one expander per practice area (STATIC HTML tables)
 for pa in ["Estate Planning","Estate Administration","Civil Litigation","Business transactional","Other"]:
     sub = report.loc[report["Practice Area"] == pa].copy()
 
     # "ALL" row = sum of attorneys in that practice area
-    all_row = pd.DataFrame([{
-        "Attorney": "__ALL__", "Attorney_Display":"ALL",
-        "PNCs who met": int(sub["PNCs who met"].sum()),
-        "PNCs who met and retained": int(sub["PNCs who met and retained"].sum()),
-        "% of PNCs who met and retained": (0.0 if denom_pncs == 0 else round((sub["PNCs who met and retained"].sum() / denom_pncs) * 100.0, 2))
-    }])
+    all_met = int(sub["PNCs who met"].sum()) if not sub.empty else 0
+    all_met_ret = int(sub["PNCs who met and retained"].sum()) if not sub.empty else 0
+    all_pct = 0.0 if denom_pncs == 0 else round((all_met_ret / denom_pncs) * 100.0, 2)
 
-    show = pd.concat([all_row, sub[[
-        "Attorney","Attorney_Display","PNCs who met","PNCs who met and retained","% of PNCs who met and retained"
-    ]]], ignore_index=True)
-
-    if show.empty:
+    if sub.empty and all_met == 0 and all_met_ret == 0:
         continue
 
     with st.expander(pa, expanded=False):
-        attys = ["ALL"] + [n for n in show["Attorney_Display"].tolist() if n != "ALL"]
+        attys = ["ALL"] + (sub["Attorney_Display"].tolist() if not sub.empty else [])
         pick = st.selectbox(f"{pa} — choose attorney", attys, key=f"pa_pick_{pa}")
 
         if pick == "ALL":
-            rowx = show.iloc[0]
-            title_name = "ALL"
+            html = _mini_table_html("ALL", all_met, all_met_ret, all_pct)
         else:
-            rowx = show.loc[show["Attorney_Display"] == pick].iloc[0]
-            title_name = pick
-
-        st.markdown(f"**Conversion Report: {title_name}**")
-        table_df = pd.DataFrame({
-            "Metric": [
-                f"PNCs who met with {title_name}",
-                f"PNCs who met with {title_name} and retained",
-                f"% of PNCs who met with {title_name} and retained",
-            ],
-            "Value": [
+            rowx = sub.loc[sub["Attorney_Display"] == pick].iloc[0]
+            html = _mini_table_html(
+                pick,
                 int(rowx["PNCs who met"]),
                 int(rowx["PNCs who met and retained"]),
-                f'{float(rowx["% of PNCs who met and retained"]):.2f}%',
-            ],
-        })
-        st.table(table_df.set_index("Metric"))  # static, no sorting, no extra index column
+                float(rowx["% of PNCs who met and retained"]),
+            )
+        st.markdown(html, unsafe_allow_html=True)
 
 # ───────────────────────────────────────────────────────────────────────────────
 # Quiet logs (optional)
