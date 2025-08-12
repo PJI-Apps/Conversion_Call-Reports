@@ -1178,30 +1178,30 @@ def _norm_initials(x: str) -> str:
     # Treat 'c.w.', ' cw ', 'C W', 'cw' → 'CW'
     return re.sub(r"[^A-Z]", "", str(x or "").upper())
 
-# Initial_Consultation: apply exclusions
+# Initial_Consultation: apply exclusions (robust to missing columns)
 init_work = init_in.copy()
 if not init_work.empty:
     init_work["Lead Attorney"] = init_work.get("Lead Attorney","").astype(str).map(_norm_name)
-    init_work = init_work.loc[_exclude_status_series(init_work.get("Status",""))].copy()
+    status_ok = _exclude_status_series(init_work["Status"]) if "Status" in init_work.columns else pd.Series(True, index=init_work.index)
+    init_work = init_work.loc[status_ok].copy()
 
-# Discovery_Meeting: apply exclusions + remove Follow Up
+# Discovery_Meeting: apply exclusions + remove Follow Up (robust to missing columns)
 disc_work = disc_in.copy()
 if not disc_work.empty:
     disc_work["Lead Attorney"] = disc_work.get("Lead Attorney","").astype(str).map(_norm_name)
-    ok_status = _exclude_status_series(disc_work.get("Status",""))
-    not_follow = ~disc_work.get("Sub Status","").astype(str).str.strip().str.lower().eq("follow up")
-    disc_work = disc_work.loc[ok_status & not_follow].copy()
+    status_ok = _exclude_status_series(disc_work["Status"]) if "Status" in disc_work.columns else pd.Series(True, index=disc_work.index)
+    not_follow = ~disc_work["Sub Status"].astype(str).str.strip().str.lower().eq("follow up") if "Sub Status" in disc_work.columns else pd.Series(True, index=disc_work.index)
+    disc_work = disc_work.loc[status_ok & not_follow].copy()
 
 # Meetings per attorney = IC + DM
 ic_counts = (init_work["Lead Attorney"].value_counts() if "Lead Attorney" in init_work.columns else pd.Series(dtype=int))
 dm_counts = (disc_work["Lead Attorney"].value_counts() if "Lead Attorney" in disc_work.columns else pd.Series(dtype=int))
 meet = pd.concat([ic_counts.rename("IC"), dm_counts.rename("DM")], axis=1).fillna(0)
 meet["PNCs who met"] = meet["IC"] + meet["DM"]
-meet = meet.reset_index().rename(columns={"index":"Attorney"})
 
-# Ensure every configured attorney appears
-all_configured = sorted(set(sum(PRACTICE_AREAS.values(), [])))
-meet = pd.DataFrame({"Attorney": all_configured}).merge(meet, on="Attorney", how="left").fillna({"IC":0,"DM":0,"PNCs who met":0})
+# Ensure the index becomes a column specifically named "Attorney" (avoids KeyError on merge)
+idx_name = meet.index.name or "index"
+meet = meet.reset_index().rename(columns={idx_name: "Attorney"})
 
 # Retained per attorney (NCL): use initials in "Responsible Attorney" (preferred) or "Atty Initials"
 retained_flag_col = None
@@ -1217,14 +1217,15 @@ def _retained_counts(ncl_slice: pd.DataFrame) -> pd.DataFrame:
     if kept.empty:
         return pd.DataFrame({"Attorney": [], "PNCs who met and retained": []})
 
-    # Choose initials source (Responsible Attorney preferred, else Atty Initials if present)
-    if "Responsible Attorney" in kept.columns:
-        kept["_ini"] = kept["Responsible Attorney"].map(_norm_initials)
-    elif "Atty Initials" in kept.columns:
-        kept["_ini"] = kept["Atty Initials"].map(_norm_initials)
-    else:
+    # Prefer "Responsible Attorney" (initials), else "Atty Initials" / "Attorney Initials"
+    initials_col = None
+    for c in ["Responsible Attorney", "Atty Initials", "Attorney Initials"]:
+        if c in kept.columns:
+            initials_col = c; break
+    if initials_col is None:
         return pd.DataFrame({"Attorney": [], "PNCs who met and retained": []})
 
+    kept["_ini"] = kept[initials_col].map(_norm_initials)
     kept["_att"] = kept["_ini"].map(lambda ini: INITIALS_TO_ATTORNEY.get(ini, "Other"))
     out = (kept["_att"]
            .value_counts()
@@ -1235,8 +1236,19 @@ def _retained_counts(ncl_slice: pd.DataFrame) -> pd.DataFrame:
 
 retained = _retained_counts(ncl_in)
 
+# Build base list of attorneys: configured + any who appear in data (meet/retained)
+configured = sorted(set(sum(PRACTICE_AREAS.values(), [])))
+seen_meet = set(meet["Attorney"].unique().tolist()) if "Attorney" in meet.columns else set()
+seen_ret  = set(retained["Attorney"].unique().tolist()) if not retained.empty else set()
+base_names = sorted(set(configured) | seen_meet | seen_ret)
+
+base_df = pd.DataFrame({"Attorney": base_names})
+
 # Merge & compute percentage (Row 3 = retained ÷ # of PNCs from first block)
-report = meet.merge(retained, on="Attorney", how="left").fillna({"PNCs who met and retained": 0})
+report = base_df.merge(meet[["Attorney","PNCs who met"]], on="Attorney", how="left").merge(
+    retained, on="Attorney", how="left"
+).fillna({"PNCs who met": 0, "PNCs who met and retained": 0})
+
 report["Practice Area"] = report["Attorney"].map(_practice_for)
 report["Attorney_Display"] = report["Attorney"].map(_display)
 
@@ -1250,20 +1262,31 @@ report["% of PNCs who met and retained"] = report.apply(
 for pa in ["Estate Planning","Estate Administration","Civil Litigation","Business transactional","Other"]:
     sub = report.loc[report["Practice Area"] == pa].copy()
 
-    # "ALL" row = sum of attorneys in that practice area
-    all_row = pd.DataFrame([{
-        "Attorney": "__ALL__", "Attorney_Display":"ALL",
-        "PNCs who met": int(sub["PNCs who met"].sum()),
-        "PNCs who met and retained": int(sub["PNCs who met and retained"].sum()),
-        "% of PNCs who met and retained": (0.0 if denom_pncs == 0 else round((sub["PNCs who met and retained"].sum() / denom_pncs) * 100.0, 2))
-    }])
+    if sub.empty:
+        # Still show the expander with an ALL row of zeros if configured but no data
+        if pa in PRACTICE_AREAS:
+            attys_here = [DISPLAY_NAME_OVERRIDES.get(n, n) for n in PRACTICE_AREAS[pa]]
+        else:
+            attys_here = []
+        zero_all = pd.DataFrame([{
+            "Attorney": "__ALL__", "Attorney_Display":"ALL",
+            "PNCs who met": 0,
+            "PNCs who met and retained": 0,
+            "% of PNCs who met and retained": 0.0
+        }])
+        show = zero_all
+    else:
+        # "ALL" row = sum of attorneys in that practice area
+        all_row = pd.DataFrame([{
+            "Attorney": "__ALL__", "Attorney_Display":"ALL",
+            "PNCs who met": int(sub["PNCs who met"].sum()),
+            "PNCs who met and retained": int(sub["PNCs who met and retained"].sum()),
+            "% of PNCs who met and retained": (0.0 if denom_pncs == 0 else round((sub["PNCs who met and retained"].sum() / denom_pncs) * 100.0, 2))
+        }])
 
-    show = pd.concat([all_row, sub[[
-        "Attorney","Attorney_Display","PNCs who met","PNCs who met and retained","% of PNCs who met and retained"
-    ]]], ignore_index=True)
-
-    if show.empty:
-        continue
+        show = pd.concat([all_row, sub[[
+            "Attorney","Attorney_Display","PNCs who met","PNCs who met and retained","% of PNCs who met and retained"
+        ]]], ignore_index=True)
 
     with st.expander(pa, expanded=False):
         attys = ["ALL"] + [n for n in show["Attorney_Display"].tolist() if n != "ALL"]
