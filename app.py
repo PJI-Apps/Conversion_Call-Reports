@@ -1190,6 +1190,16 @@ def _retained_counts_from_ncl(ncl_df: pd.DataFrame) -> pd.Series:
     CANON = sum(PRACTICE_AREAS.values(), []) + OTHER_ATTORNEYS
     return pd.Series({name: int(counts.get(name, 0)) for name in CANON})
 
+def _display_safe(n: str) -> str:
+    return globals().get("DISPLAY_NAME_OVERRIDES", {}).get(n, n)
+
+DISPLAY_NAME_OVERRIDES = {
+    "Elias Kerby": "Eli Kerby",
+    "William Bang": "Billy Bang",
+    "William Gogoel": "Will Gogoel",
+    "Andrew Suddarth": "Andy Suddarth",
+}
+
 # ---------- Build report ----------
 # Build the full roster (practice areas + explicit Other), de-duplicated in order
 CANON = list(dict.fromkeys(sum(PRACTICE_AREAS.values(), []) + OTHER_ATTORNEYS))
@@ -1205,7 +1215,10 @@ report = pd.DataFrame({"Attorney": CANON})
 report["PNCs who met"] = report["Attorney"].map(lambda a: int(met_by_attorney.get(a, 0)))
 report["PNCs who met and retained"] = report["Attorney"].map(lambda a: int(retained_by_attorney.get(a, 0)))
 report["Practice Area"] = report["Attorney"].map(_practice_for)
-report["Attorney_Display"] = report["Attorney"].map(lambda n: DISPLAY_NAME_OVERRIDES.get(n, n))
+report["Attorney_Display"] = report["Attorney"].map(
+    lambda n: DISPLAY_NAME_OVERRIDES.get(n, n) if "DISPLAY_NAME_OVERRIDES" in globals() else n
+)
+
 
 
 
