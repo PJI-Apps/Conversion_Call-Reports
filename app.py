@@ -1,6 +1,3 @@
-# Create a full updated app file that preserves the user's code and applies the agreed fixes.
-# We'll name it app_updated.py so it's easy to download separately.
-
 # app.py
 # PJI Law • Conversion and Call Report (Streamlit)
 
@@ -1308,10 +1305,3 @@ with st.expander("ℹ️ Logs (tech details)", expanded=False):
             st.code(line)
     else:
         st.caption("No technical logs this session.")
-'''
-
-out_path = "/mnt/data/app_updated.py"
-with open(out_path, "w", encoding="utf-8") as f:
-    f.write(code)
-
-out_path
