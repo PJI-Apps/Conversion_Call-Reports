@@ -1131,7 +1131,7 @@ def _between_dates(s, start, end):
     return x.between(pd.Timestamp(start), pd.Timestamp(end), inclusive="both")
 
 # ---------- IC/DM “met with” ----------
-def _met_counts_raw = _met_counts_from_ic_dm(df_init, df_disc, start_date, end_date) -> pd.Series:
+def _met_counts_from_ic_dm(ic_df: pd.DataFrame, dm_df: pd.DataFrame, start_date, end_date) -> pd.Series:
     pieces = []
     for df, date_col, att_col in [
         (ic_df, "Initial Consultation With Pji Law", "Lead Attorney"),
@@ -1156,9 +1156,8 @@ def _met_counts_raw = _met_counts_from_ic_dm(df_init, df_disc, start_date, end_d
 # Build full roster = practice areas + explicit Other
 CANON = sum(PRACTICE_AREAS.values(), []) + OTHER_ATTORNEYS
 
-met_raw = _met_counts_raw = _met_counts_from_ic_dm(df_init, df_disc, start_date, end_date)
-met_by_attorney = {name: int(met_raw.get(name, 0)) for name in CANON}
-
+met_counts_raw = _met_counts_from_ic_dm(df_init, df_disc, start_date, end_date)
+met_by_attorney = {name: int(met_counts_raw.get(name, 0)) for name in CANON}
 # ---------- NCL “met & retained” (E,F,G) ----------
 def _retained_counts_from_ncl(ncl_df: pd.DataFrame) -> pd.Series:
     """NCL-only retained: Column G in range, Column F != 'N', attribute by initials in Column E."""
