@@ -1130,9 +1130,8 @@ def _between_dates(s, start, end):
     x = x.dt.normalize()
     return x.between(pd.Timestamp(start), pd.Timestamp(end), inclusive="both")
 
-# ---------- Accurate "PNCs who met" and "PNCs who met and retained" (name-based, no indexes) ----------
+# ---------- Accurate counts (by column names, no indexes) ----------
 
-# Friendly display names (used in the UI)
 DISPLAY_NAME_OVERRIDES = {
     "Elias Kerby": "Eli Kerby",
     "William Bang": "Billy Bang",
@@ -1145,7 +1144,7 @@ def _display_safe(n: str) -> str:
 # Canonical roster = all PAs + explicit "Other" names, preserving order
 CANON = list(dict.fromkeys(sum(PRACTICE_AREAS.values(), []) + OTHER_ATTORNEYS))
 
-# NCL initials → full names (exactly what you provided, incl. JK/CM/Other)
+# NCL initials → full names
 INITIALS_TO_ATTORNEY = {
     "CW":"Connor Watkins","JF":"Jennifer Fox","RM":"Rebecca Megel",
     "AH":"Adam Hill","EK":"Elias Kerby","ER":"Elizabeth Ross",
@@ -1160,10 +1159,8 @@ INITIALS_TO_ATTORNEY = {
 }
 
 import re
-def _ini_to_full(val: str) -> str | None:
-    """Robustly map NCL initials to a full attorney name."""
-    if val is None:
-        return None
+def _ini_to_full(val: str) -> str:
+    if val is None: return "Other"
     s = str(val).upper()
     letters_only = re.sub(r"[^A-Z]", "", s)
     if len(letters_only) == 2 and letters_only in INITIALS_TO_ATTORNEY:
@@ -1171,37 +1168,46 @@ def _ini_to_full(val: str) -> str | None:
     for tok in re.findall(r"[A-Z]{2}", s):
         if tok in INITIALS_TO_ATTORNEY:
             return INITIALS_TO_ATTORNEY[tok]
-    return "Other"  # keep unknowns visible under Other
+    return "Other"
+
+def _col(df: pd.DataFrame, candidates: list[str]) -> str | None:
+    if df is None or df.empty: return None
+    by_lower = {c.lower().strip(): c for c in df.columns}
+    for cand in candidates:
+        k = cand.lower().strip()
+        if k in by_lower: return by_lower[k]
+    return None
 
 def _is_blank(series: pd.Series) -> pd.Series:
     s = series.astype(str)
     return series.isna() | (s.str.strip() == "") | (s.str.lower().isin(["nan","none"]))
 
-def _met_counts_from_ic_dm_by_name(ic_df: pd.DataFrame, dm_df: pd.DataFrame) -> dict:
-    """
-    PNCs who met with {Attorney}:
-      • Initial_Consultation:   'Lead Attorney' (L), 'Initial Consultation With Pji Law' (M)
-      • Discovery_Meeting:      'Lead Attorney' (L), 'Discovery Meeting With Pji Law' (P)
-      • Exclude any row where 'Sub Status' == 'Follow Up' OR 'Reason for Rescheduling' (I) is non-blank.
-    IMPORTANT: Expects ic_df/dm_df to already be filtered to the selected date window (init_in/disc_in).
-    """
+def _met_counts_from_ic_dm_named(ic_df: pd.DataFrame, dm_df: pd.DataFrame) -> dict:
     parts = []
 
+    # Initial Consultation
     if isinstance(ic_df, pd.DataFrame) and not ic_df.empty:
-        need = {"Lead Attorney","Initial Consultation With Pji Law","Sub Status","Reason for Rescheduling"}
-        if need.issubset(ic_df.columns):
+        att = _col(ic_df, ["Lead Attorney","Lead atty","Attorney"])
+        sub = _col(ic_df, ["Sub Status"])
+        reason = _col(ic_df, ["Reason for Rescheduling","Reason"])
+        if att:
             t = ic_df.copy()
-            mask = ~t["Sub Status"].astype(str).str.strip().str.lower().eq("follow up")
-            mask &= _is_blank(t["Reason for Rescheduling"])
-            parts.append(t.loc[mask, "Lead Attorney"].astype(str).str.strip())
+            m = pd.Series(True, index=t.index)
+            if sub:    m &= ~t[sub].astype(str).str.strip().str.lower().eq("follow up")
+            if reason: m &= _is_blank(t[reason])
+            parts.append(t.loc[m, att].astype(str).str.strip())
 
+    # Discovery Meeting
     if isinstance(dm_df, pd.DataFrame) and not dm_df.empty:
-        need = {"Lead Attorney","Discovery Meeting With Pji Law","Sub Status","Reason for Rescheduling"}
-        if need.issubset(dm_df.columns):
+        att = _col(dm_df, ["Lead Attorney","Lead atty","Attorney"])
+        sub = _col(dm_df, ["Sub Status"])
+        reason = _col(dm_df, ["Reason for Rescheduling","Reason"])
+        if att:
             t = dm_df.copy()
-            mask = ~t["Sub Status"].astype(str).str.strip().str.lower().eq("follow up")
-            mask &= _is_blank(t["Reason for Rescheduling"])
-            parts.append(t.loc[mask, "Lead Attorney"].astype(str).str.strip())
+            m = pd.Series(True, index=t.index)
+            if sub:    m &= ~t[sub].astype(str).str.strip().str.lower().eq("follow up")
+            if reason: m &= _is_blank(t[reason])
+            parts.append(t.loc[m, att].astype(str).str.strip())
 
     if not parts:
         return {}
@@ -1210,49 +1216,36 @@ def _met_counts_from_ic_dm_by_name(ic_df: pd.DataFrame, dm_df: pd.DataFrame) -> 
     met_series = met_series[met_series.ne("")]
     return met_series.value_counts(dropna=False).to_dict()
 
-def _retained_counts_from_ncl_by_name(ncl_df: pd.DataFrame) -> dict:
-    """
-    PNCs who met with {Attorney} AND retained:
-      • New Clients List only
-      • Date window handled by ncl_in slice (already filtered above)
-      • Exclude rows with 'Retained With Consult (Y/N)' == 'N'
-      • Attribute by 'Responsible Attorney' (initials → full name)
-    """
-    if not isinstance(ncl_df, pd.DataFrame) or ncl_df.empty:
-        return {}
-    need = {"Responsible Attorney","Retained With Consult (Y/N)","Date we had BOTH the signed CLA and full payment"}
-    if not need.issubset(ncl_df.columns):
-        return {}
+def _retained_counts_from_ncl_named(ncl_df: pd.DataFrame) -> dict:
+    if not isinstance(ncl_df, pd.DataFrame) or ncl_df.empty: return {}
+    init_col = _col(ncl_df, ["Responsible Attorney"])
+    flag_col = _col(ncl_df, ["Retained With Consult (Y/N)"])
+    date_col = _col(ncl_df, ["Date we had BOTH the signed CLA and full payment"])
+    if not (init_col and flag_col and date_col): return {}
 
     t = ncl_df.copy()
-    mask = t["Retained With Consult (Y/N)"].astype(str).str.strip().str.upper().ne("N")
-    mapped = t.loc[mask, "Responsible Attorney"].map(_ini_to_full)
-    vc = mapped.value_counts(dropna=False).to_dict()
-    return vc
+    # ncl_in is already date-filtered by your Conversion Report, so we just apply the flag here
+    mask = t[flag_col].astype(str).str.strip().str.upper().ne("N")
+    mapped = t.loc[mask, init_col].map(_ini_to_full)
+    return mapped.value_counts(dropna=False).to_dict()
 
-# Build once using the already date-filtered slices
-_met_counts = _met_counts_from_ic_dm_by_name(init_in, disc_in)
-_ret_counts = _retained_counts_from_ncl_by_name(ncl_in)
+# Use your already date-filtered slices: init_in, disc_in, ncl_in
+_met_counts = _met_counts_from_ic_dm_named(init_in, disc_in)
+_ret_counts = _retained_counts_from_ncl_named(ncl_in)
 
 met_by_attorney      = {name: int(_met_counts.get(name, 0)) for name in CANON}
 retained_by_attorney = {name: int(_ret_counts.get(name, 0)) for name in CANON}
 
-# Assemble the report (unchanged)
+# Assemble the report
 report = pd.DataFrame({"Attorney": CANON})
 report["PNCs who met"] = report["Attorney"].map(lambda a: met_by_attorney.get(a, 0))
 report["PNCs who met and retained"] = report["Attorney"].map(lambda a: retained_by_attorney.get(a, 0))
 report["Practice Area"] = report["Attorney"].map(_practice_for)
 report["Attorney_Display"] = report["Attorney"].map(_display_safe)
 
-# Denominator for % (your original row2)
-denom_pncs = int(row2) if isinstance(row2, (int, float)) else 0
-report["% of PNCs who met and retained"] = report.apply(
-    lambda r: 0.0 if denom_pncs == 0 else round((r["PNCs who met and retained"] / denom_pncs) * 100.0, 2),
-    axis=1
-)
-
-# ---------- Render ----------
-def _render_three_row_card(title_name: str, met: int, kept: int, pct: float):
+# ---------- Render (percent = retained / met, not retained / total PNCs) ----------
+def _render_three_row_card(title_name: str, met: int, kept: int):
+    pct = 0.0 if int(met) == 0 else round((int(kept) / int(met)) * 100.0, 2)
     rows = [
         (f"PNCs who met with {title_name}", f"{int(met)}"),
         (f"PNCs who met with {title_name} and retained", f"{int(kept)}"),
@@ -1277,27 +1270,21 @@ def _render_three_row_card(title_name: str, met: int, kept: int, pct: float):
 
 for pa in ["Estate Planning","Estate Administration","Civil Litigation","Business transactional","Other"]:
     sub = report.loc[report["Practice Area"] == pa].copy()
-
     met_sum  = int(sub["PNCs who met"].sum())
     kept_sum = int(sub["PNCs who met and retained"].sum())
-    # Keep your original convention: show area % as a share of *total PNCs* (row2), not met-based
-    pct_sum  = 0.0 if denom_pncs == 0 else round((kept_sum / denom_pncs) * 100.0, 2)
 
     with st.expander(pa, expanded=False):
         attys = ["ALL"] + sub["Attorney_Display"].tolist()
         pick = st.selectbox(f"{pa} — choose attorney", attys, key=f"pa_pick_{pa.replace(' ','_')}")
-
         if pick == "ALL":
-            _render_three_row_card("ALL", met_sum, kept_sum, pct_sum)
+            _render_three_row_card("ALL", met_sum, kept_sum)
         else:
             rowx = sub.loc[sub["Attorney_Display"] == pick].iloc[0]
             _render_three_row_card(
                 pick,
                 int(rowx["PNCs who met"]),
                 int(rowx["PNCs who met and retained"]),
-                float(rowx["% of PNCs who met and retained"]),
             )
-
 
 # ───────────────────────────────────────────────────────────────────────────────
 # Debug details
