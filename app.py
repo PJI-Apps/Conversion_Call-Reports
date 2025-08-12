@@ -1198,8 +1198,7 @@ ic_counts = (init_work["Lead Attorney"].value_counts() if "Lead Attorney" in ini
 dm_counts = (disc_work["Lead Attorney"].value_counts() if "Lead Attorney" in disc_work.columns else pd.Series(dtype=int))
 meet = pd.concat([ic_counts.rename("IC"), dm_counts.rename("DM")], axis=1).fillna(0)
 meet["PNCs who met"] = meet["IC"] + meet["DM"]
-
-# Ensure the index becomes a column specifically named "Attorney" (avoids KeyError on merge)
+# Reset index to a proper "Attorney" column
 idx_name = meet.index.name or "index"
 meet = meet.reset_index().rename(columns={idx_name: "Attorney"})
 
@@ -1227,11 +1226,10 @@ def _retained_counts(ncl_slice: pd.DataFrame) -> pd.DataFrame:
 
     kept["_ini"] = kept[initials_col].map(_norm_initials)
     kept["_att"] = kept["_ini"].map(lambda ini: INITIALS_TO_ATTORNEY.get(ini, "Other"))
-    out = (kept["_att"]
-           .value_counts()
-           .rename("PNCs who met and retained")
-           .reset_index()
-           .rename(columns={"index":"Attorney"}))
+
+    out = kept["_att"].value_counts().rename("PNCs who met and retained").reset_index()
+    # Robustly rename the first column to "Attorney" regardless of its current name
+    out = out.rename(columns={out.columns[0]: "Attorney"})
     return out
 
 retained = _retained_counts(ncl_in)
@@ -1239,7 +1237,7 @@ retained = _retained_counts(ncl_in)
 # Build base list of attorneys: configured + any who appear in data (meet/retained)
 configured = sorted(set(sum(PRACTICE_AREAS.values(), [])))
 seen_meet = set(meet["Attorney"].unique().tolist()) if "Attorney" in meet.columns else set()
-seen_ret  = set(retained["Attorney"].unique().tolist()) if not retained.empty else set()
+seen_ret  = set(retained["Attorney"].unique().tolist()) if ("Attorney" in retained.columns and not retained.empty) else set()
 base_names = sorted(set(configured) | seen_meet | seen_ret)
 
 base_df = pd.DataFrame({"Attorney": base_names})
@@ -1263,11 +1261,6 @@ for pa in ["Estate Planning","Estate Administration","Civil Litigation","Busines
     sub = report.loc[report["Practice Area"] == pa].copy()
 
     if sub.empty:
-        # Still show the expander with an ALL row of zeros if configured but no data
-        if pa in PRACTICE_AREAS:
-            attys_here = [DISPLAY_NAME_OVERRIDES.get(n, n) for n in PRACTICE_AREAS[pa]]
-        else:
-            attys_here = []
         zero_all = pd.DataFrame([{
             "Attorney": "__ALL__", "Attorney_Display":"ALL",
             "PNCs who met": 0,
@@ -1312,7 +1305,8 @@ for pa in ["Estate Planning","Estate Administration","Civil Litigation","Busines
                 f'{float(rowx["% of PNCs who met and retained"]):.2f}%',
             ]
         })
-        st.dataframe(three_rows, use_container_width=True)
+        # Hide the 0/1/2 index column
+        st.dataframe(three_rows, hide_index=True, use_container_width=True)
 
 with st.expander("Debug details (for reconciliation)", expanded=False):
     if not df_leads.empty and "Stage" in df_leads.columns and len(leads_in_range) == len(df_leads):
