@@ -1280,31 +1280,49 @@ for cand in ["Retained With Consult (Y/N)", "Retained with Consult (Y/N)"]:
         retained_flag_col = cand; break
 
 def _retained_counts(ncl_slice: pd.DataFrame) -> pd.DataFrame:
-    # Always return a 2-col DataFrame with exact schema
-    schema = ["Attorney", "PNCs who met and retained"]
-    if ncl_slice.empty or retained_flag_col is None:
-        return pd.DataFrame(columns=schema)
+    """
+    Count 'PNCs who met and retained' per attorney using ONLY:
+      - E: 'Responsible Attorney' (initials, e.g., 'CW')
+      - F: 'Retained With Consult (Y/N)'  (anything not 'N' counts as retained-after-consult)
+      - G: 'Date we had BOTH the signed CLA and full payment' (period filter already applied)
+    """
+    cols_needed = {"Responsible Attorney", retained_flag_col}
+    if ncl_slice.empty or retained_flag_col is None or not cols_needed.issubset(ncl_slice.columns):
+        return pd.DataFrame({"Attorney": [], "PNCs who met and retained": []})
 
+    # Keep only retained-after-consult (F != 'N')
     flag = ncl_slice[retained_flag_col].astype(str).str.strip().str.upper()
     kept = ncl_slice.loc[flag != "N"].copy()
     if kept.empty:
-        return pd.DataFrame(columns=schema)
+        return pd.DataFrame({"Attorney": [], "PNCs who met and retained": []})
 
-    # Choose initials source (Responsible Attorney preferred, else Atty Initials if present)
-    initials_col = "Responsible Attorney" if "Responsible Attorney" in kept.columns else ("Atty Initials" if "Atty Initials" in kept.columns else None)
-    if initials_col is None:
-        return pd.DataFrame(columns=schema)
+    def _ini_to_attorney(raw: str) -> str:
+        # Normalize, split multi-initial cells (e.g., 'CW/JF', 'CW & ER') and use the first match
+        s = str(raw or "").upper()
+        tokens = re.findall(r"[A-Z]{2}", s)  # pick 2-letter tokens only
+        for t in tokens:
+            att = INITIALS_TO_ATTORNEY.get(t)
+            if att:
+                return att
+        return "Other"
 
-    kept["_ini"] = kept[initials_col].map(_norm_initials)
-    kept["_att"] = kept["_ini"].map(lambda ini: INITIALS_TO_ATTORNEY.get(ini, "Other"))
-    out = kept["_att"].value_counts(dropna=False)
-    out = out.rename("PNCs who met and retained").reset_index().rename(columns={"index":"Attorney"})
+    kept["_att"] = kept["Responsible Attorney"].map(_ini_to_attorney)
 
-    # Enforce schema and dtypes
-    out = out.reindex(columns=schema)
+    out = (
+        kept["_att"]
+        .value_counts(dropna=False)
+        .rename("PNCs who met and retained")
+        .reset_index()
+        .rename(columns={"index": "Attorney"})
+    )
+
+    # Ensure types are clean
     out["Attorney"] = out["Attorney"].astype(str)
-    out["PNCs who met and retained"] = pd.to_numeric(out["PNCs who met and retained"], errors="coerce").fillna(0).astype(int)
+    out["PNCs who met and retained"] = (
+        pd.to_numeric(out["PNCs who met and retained"], errors="coerce").fillna(0).astype(int)
+    )
     return out
+
 
 retained = _retained_counts(ncl_in)
 # Final safety: ensure columns exist even if something unexpected happens
