@@ -1292,12 +1292,7 @@ def _to_ts(series: pd.Series) -> pd.Series:
 
 def _between_inclusive(series: pd.Series, sd: date, ed: date) -> pd.Series:
     ts = _to_ts(series)
-    # Handle NaT values by treating them as False (not in range)
-    valid_dates = ts.notna()
-    in_range = pd.Series([False] * len(series), index=series.index)
-    if valid_dates.any():
-        in_range.loc[valid_dates] = (ts.loc[valid_dates].dt.date >= sd) & (ts.loc[valid_dates].dt.date <= ed)
-    return in_range
+    return (ts.dt.date >= sd) & (ts.dt.date <= ed)
 
 def _col_by_idx(df: pd.DataFrame, idx: int) -> Optional[str]:
     if not isinstance(df, pd.DataFrame) or df.empty: return None
