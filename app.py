@@ -1497,7 +1497,10 @@ for pa in ["Estate Planning","Estate Administration","Civil Litigation","Busines
 # ───────────────────────────────────────────────────────────────────────────────
 # 🔧 Debugging & Troubleshooting
 # ───────────────────────────────────────────────────────────────────────────────
-with st.expander("🔧 Debugging & Troubleshooting", expanded=False):
+st.markdown("---")
+st.header("🔧 Debugging & Troubleshooting")
+
+with st.expander("Debugging & Troubleshooting", expanded=False):
     with st.expander("🔧 IC/DM sanity (per sheet & PA) — current window", expanded=False):
         ic_L = _col_by_idx(df_init, 11); ic_M = _col_by_idx(df_init, 12)
         dm_L = _col_by_idx(df_disc, 11); dm_P = _col_by_idx(df_disc, 15)
