@@ -197,7 +197,7 @@ def _clean_datestr(x):
     if pd.isna(x): return x
     s = str(x).strip()
     s = re.sub(r"\s+at\s+", " ", s, flags=re.I)
-    s = re.sub(r"\s+(ET|EDT|EST|CT|CDT|CST|MT|MDT|MST|PT|PDT)$", "", s)
+    s = re.sub(r"\s+(ET|EDT|EST|CT|CDT|CST|MT|MDT|MST|PT|PDT)\b", "", s)
     return s
 
 @st.cache_data(ttl=300, show_spinner=False)
@@ -1745,3 +1745,413 @@ with st.expander("🔧 Debugging & Troubleshooting", expanded=False):
                 st.code(line)
         else:
             st.caption("No technical logs this session.")
+
+# ───────────────────────────────────────────────────────────────────────────────
+# Intake Specialist Report
+# ───────────────────────────────────────────────────────────────────────────────
+st.markdown("---")
+st.header("Conversion Report: Intake")
+
+# --- Intake Specialist mappings ---
+INTAKE_SPECIALISTS = [
+    "Anastasia Economopoulos", "Aneesah Shaik", "Azariah Pillay", "Chloe Lansdell",
+    "Earl Michaels", "Faeryal Sahadeo", "Kaithlyn Maharaj", "Micayla Sam",
+    "Nathanial Beneke", "Nobuhle Mnikathi", "Rialet van Heerden", "Sihle Gadu",
+    "Thabang Tshubyane", "Tiffany Pillay"
+]
+
+INTAKE_INITIALS_TO_NAME = {
+    "AE": "Anastasia Economopoulos",
+    "AS": "Aneesah Shaik", 
+    "AP": "Azariah Pillay",
+    "CL": "Chloe Lansdell",
+    "EM": "Earl Michaels",
+    "FS": "Faeryal Sahadeo",
+    "KM": "Kaithlyn Maharaj",
+    "MS": "Micayla Sam",
+    "NB": "Nathanial Beneke",
+    "NM": "Nobuhle Mnikathi",
+    "RH": "Rialet van Heerden",
+    "SG": "Sihle Gadu",
+    "TT": "Thabang Tshubyane",
+    "TP": "Tiffany Pillay"
+}
+
+def _intake_specialist_for(name: str) -> str:
+    """Map intake specialist name to canonical name or 'Everyone Else'"""
+    if name in INTAKE_SPECIALISTS:
+        return name
+    return "Everyone Else"
+
+def _intake_name_from_initials(initials: str) -> str:
+    """Map intake specialist initials to canonical name or 'Everyone Else'"""
+    return INTAKE_INITIALS_TO_NAME.get(initials, "Everyone Else")
+
+# --- Intake conversion calculations ---
+def _intake_pncs_by_specialist(df_leads: pd.DataFrame, specialist: str) -> int:
+    """Row 1: PNCs that the intake specialist did intake for"""
+    if df_leads.empty or "Stage" not in df_leads.columns:
+        return 0
+    
+    # Use the same excluded stages logic as main conversion report
+    excluded_stages = {
+        "Marketing/Scam/Spam (Non-Lead)", "Referred Out", "No Stage", "New Lead",
+        "No Follow Up (No Marketing/Communication)", "No Follow Up (Receives Marketing/Communication)",
+        "Anastasia E", "Aneesah S.", "Azariah P.", "Earl M.", "Faeryal S.", "Kaithlyn M.",
+        "Micayla S.", "Nathanial B.", "Rialet v H.", "Sihle G.", "Thabang T.", "Tiffany P",
+        ":Chloe L:", "Nobuhle M."
+    }
+    
+    # Filter by date range (using batch period overlap logic)
+    if not df_leads.empty and {"__batch_start","__batch_end"} <= set(df_leads.columns):
+        bs = pd.to_datetime(df_leads["__batch_start"], errors="coerce")
+        be = pd.to_datetime(df_leads["__batch_end"], errors="coerce")
+        start_ts, end_ts = pd.Timestamp(start_date), pd.Timestamp(end_date)
+        leads_in_range = (bs <= end_ts) & (be >= start_ts)
+    else:
+        leads_in_range = pd.Series(False, index=df_leads.index)
+    
+    # Find Assigned Intake Specialist column
+    intake_col = _find_col(df_leads, ["Assigned Intake Specialist"])
+    if not intake_col:
+        return 0
+    
+    # Filter by stage and intake specialist
+    valid_stage = ~df_leads["Stage"].astype(str).str.strip().isin(excluded_stages)
+    if specialist == "Everyone Else":
+        valid_intake = ~df_leads[intake_col].astype(str).str.strip().isin(INTAKE_SPECIALISTS)
+    else:
+        valid_intake = df_leads[intake_col].astype(str).str.strip().eq(specialist)
+    
+    return int((leads_in_range & valid_stage & valid_intake).sum())
+
+def _intake_retained_without_consult(df_ncl: pd.DataFrame, specialist: str) -> int:
+    """Row 3: PNCs who retained without consultation for this intake specialist"""
+    if df_ncl.empty:
+        return 0
+    
+    # Use same robust column detection as practice area section
+    def _norm(s: str) -> str:
+        s = str(s).lower().strip()
+        s = _re.sub(r"[\s_]+"," ", s)
+        s = _re.sub(r"[^a-z0-9 ]","", s)
+        return s
+    
+    cols = list(df_ncl.columns)
+    norms = {c: _norm(c) for c in cols}
+    
+    # Find date column
+    prefer_date = _norm("Date we had BOTH the signed CLA and full payment")
+    date_col = next((c for c in cols if norms[c] == prefer_date), None)
+    if date_col is None:
+        cands = [c for c in cols if all(tok in norms[c] for tok in ["date","signed","payment"])]
+        if cands:
+            cands.sort(key=lambda c: len(norms[c]))
+            date_col = cands[0]
+    if date_col is None:
+        date_col = next((c for c in cols if "date" in norms[c]), None)
+    if date_col is None and len(cols) > 6:
+        date_col = cols[6]  # Column G
+    
+    # Find retained flag column
+    prefer_flag = _norm("Retained With Consult (Y/N)")
+    flag_col = next((c for c in cols if norms[c] == prefer_flag), None)
+    if flag_col is None:
+        flag_col = next((c for c in cols if all(tok in norms[c] for tok in ["retained","consult"])), None)
+    if flag_col is None:
+        flag_col = next((c for c in cols if "retained" in norms[c]), None)
+    if flag_col is None and len(cols) > 5:
+        flag_col = cols[5]  # Column F
+    
+    # Find Primary Intake column
+    intake_col = next((c for c in cols if all(tok in norms[c] for tok in ["primary","intake"])), None)
+    if intake_col is None:
+        intake_col = next((c for c in cols if "intake" in norms[c]), None)
+    if intake_col is None and len(cols) > 9:
+        intake_col = cols[9]  # Column J
+    
+    if not (date_col and flag_col and intake_col):
+        return 0
+    
+    # Filter by date range and retained flag = "N"
+    in_range = _between_inclusive(df_ncl[date_col], start_date, end_date)
+    retained_without = df_ncl[flag_col].astype(str).str.strip().str.upper().eq("N")
+    
+    # Filter by intake specialist
+    if specialist == "Everyone Else":
+        valid_intake = ~df_ncl[intake_col].astype(str).str.strip().isin(INTAKE_INITIALS_TO_NAME.keys())
+    else:
+        # Find initials for this specialist
+        specialist_initials = next((init for init, name in INTAKE_INITIALS_TO_NAME.items() if name == specialist), None)
+        if specialist_initials:
+            valid_intake = df_ncl[intake_col].astype(str).str.strip().eq(specialist_initials)
+        else:
+            valid_intake = pd.Series(False, index=df_ncl.index)
+    
+    return int((in_range & retained_without & valid_intake).sum())
+
+def _intake_scheduled_consult(df_init: pd.DataFrame, df_disc: pd.DataFrame, specialist: str) -> int:
+    """Row 4: PNCs who scheduled consultation for this intake specialist"""
+    total = 0
+    
+    # Initial Consultation
+    if not df_init.empty:
+        # Find Assigned Intake Specialist column
+        intake_col = _find_col(df_init, ["Assigned Intake Specialist"])
+        if intake_col:
+            # Use same logic as main conversion report for scheduled
+            sub_col = _find_col(df_init, ["Sub Status"])
+            in_scope = df_init.copy()
+            if sub_col and sub_col in in_scope.columns:
+                in_scope = in_scope.loc[~in_scope[sub_col].astype(str).str.strip().str.lower().eq("follow up")].copy()
+            
+            # Filter by intake specialist
+            if specialist == "Everyone Else":
+                valid_intake = ~in_scope[intake_col].astype(str).str.strip().isin(INTAKE_SPECIALISTS)
+            else:
+                valid_intake = in_scope[intake_col].astype(str).str.strip().eq(specialist)
+            
+            total += int(valid_intake.sum())
+    
+    # Discovery Meeting
+    if not df_disc.empty:
+        # Find Assigned Intake Specialist column
+        intake_col = _find_col(df_disc, ["Assigned Intake Specialist"])
+        if intake_col:
+            # Use same logic as main conversion report for scheduled
+            sub_col = _find_col(df_disc, ["Sub Status"])
+            in_scope = df_disc.copy()
+            if sub_col and sub_col in in_scope.columns:
+                in_scope = in_scope.loc[~in_scope[sub_col].astype(str).str.strip().str.lower().eq("follow up")].copy()
+            
+            # Filter by intake specialist
+            if specialist == "Everyone Else":
+                valid_intake = ~in_scope[intake_col].astype(str).str.strip().isin(INTAKE_SPECIALISTS)
+            else:
+                valid_intake = in_scope[intake_col].astype(str).str.strip().eq(specialist)
+            
+            total += int(valid_intake.sum())
+    
+    return total
+
+def _intake_showed_consult(df_init: pd.DataFrame, df_disc: pd.DataFrame, specialist: str) -> int:
+    """Row 6: PNCs who showed up for consultation for this intake specialist"""
+    total = 0
+    
+    # Initial Consultation
+    if not df_init.empty:
+        # Use same logic as practice area section for "met with"
+        if df_init.shape[1] >= 13:
+            att, dtc, sub, rsn = df_init.columns[11], df_init.columns[12], df_init.columns[6], df_init.columns[8]
+            t = df_init.copy()
+            m = _between_inclusive(t[dtc], start_date, end_date)
+            m &= ~t[sub].astype(str).str.strip().str.lower().eq("follow up")
+            # Exclude rows where reason contains "Canceled Meeting" or "No Show"
+            reason_str = t[rsn].astype(str).str.strip().str.lower()
+            m &= ~reason_str.str.contains("canceled meeting", na=False)
+            m &= ~reason_str.str.contains("no show", na=False)
+            
+            # Filter by intake specialist
+            intake_col = _find_col(df_init, ["Assigned Intake Specialist"])
+            if intake_col:
+                if specialist == "Everyone Else":
+                    valid_intake = ~t[intake_col].astype(str).str.strip().isin(INTAKE_SPECIALISTS)
+                else:
+                    valid_intake = t[intake_col].astype(str).str.strip().eq(specialist)
+                m &= valid_intake
+            
+            total += int(m.sum())
+    
+    # Discovery Meeting
+    if not df_disc.empty:
+        # Use same logic as practice area section for "met with"
+        if df_disc.shape[1] >= 16:
+            att, dtc, sub, rsn = df_disc.columns[11], df_disc.columns[15], df_disc.columns[6], df_disc.columns[8]
+            t = df_disc.copy()
+            m = _between_inclusive(t[dtc], start_date, end_date)
+            m &= ~t[sub].astype(str).str.strip().str.lower().eq("follow up")
+            # Exclude rows where reason contains "Canceled Meeting" or "No Show"
+            reason_str = t[rsn].astype(str).str.strip().str.lower()
+            m &= ~reason_str.str.contains("canceled meeting", na=False)
+            m &= ~reason_str.str.contains("no show", na=False)
+            
+            # Filter by intake specialist
+            intake_col = _find_col(df_disc, ["Assigned Intake Specialist"])
+            if intake_col:
+                if specialist == "Everyone Else":
+                    valid_intake = ~t[intake_col].astype(str).str.strip().isin(INTAKE_SPECIALISTS)
+                else:
+                    valid_intake = t[intake_col].astype(str).str.strip().eq(specialist)
+                m &= valid_intake
+            
+            total += int(m.sum())
+    
+    return total
+
+def _intake_retained_after_consult(df_ncl: pd.DataFrame, specialist: str) -> int:
+    """Row 8: PNCs retained after scheduled consultation for this intake specialist"""
+    if df_ncl.empty:
+        return 0
+    
+    # Use same robust column detection as above
+    def _norm(s: str) -> str:
+        s = str(s).lower().strip()
+        s = _re.sub(r"[\s_]+"," ", s)
+        s = _re.sub(r"[^a-z0-9 ]","", s)
+        return s
+    
+    cols = list(df_ncl.columns)
+    norms = {c: _norm(c) for c in cols}
+    
+    # Find date column
+    prefer_date = _norm("Date we had BOTH the signed CLA and full payment")
+    date_col = next((c for c in cols if norms[c] == prefer_date), None)
+    if date_col is None:
+        cands = [c for c in cols if all(tok in norms[c] for tok in ["date","signed","payment"])]
+        if cands:
+            cands.sort(key=lambda c: len(norms[c]))
+            date_col = cands[0]
+    if date_col is None:
+        date_col = next((c for c in cols if "date" in norms[c]), None)
+    if date_col is None and len(cols) > 6:
+        date_col = cols[6]  # Column G
+    
+    # Find retained flag column
+    prefer_flag = _norm("Retained With Consult (Y/N)")
+    flag_col = next((c for c in cols if norms[c] == prefer_flag), None)
+    if flag_col is None:
+        flag_col = next((c for c in cols if all(tok in norms[c] for tok in ["retained","consult"])), None)
+    if flag_col is None:
+        flag_col = next((c for c in cols if "retained" in norms[c]), None)
+    if flag_col is None and len(cols) > 5:
+        flag_col = cols[5]  # Column F
+    
+    # Find Primary Intake column
+    intake_col = next((c for c in cols if all(tok in norms[c] for tok in ["primary","intake"])), None)
+    if intake_col is None:
+        intake_col = next((c for c in cols if "intake" in norms[c]), None)
+    if intake_col is None and len(cols) > 9:
+        intake_col = cols[9]  # Column J
+    
+    if not (date_col and flag_col and intake_col):
+        return 0
+    
+    # Filter by date range and retained flag != "N"
+    in_range = _between_inclusive(df_ncl[date_col], start_date, end_date)
+    retained_after = df_ncl[flag_col].astype(str).str.strip().str.upper().ne("N")
+    
+    # Filter by intake specialist
+    if specialist == "Everyone Else":
+        valid_intake = ~df_ncl[intake_col].astype(str).str.strip().isin(INTAKE_INITIALS_TO_NAME.keys())
+    else:
+        # Find initials for this specialist
+        specialist_initials = next((init for init, name in INTAKE_INITIALS_TO_NAME.items() if name == specialist), None)
+        if specialist_initials:
+            valid_intake = df_ncl[intake_col].astype(str).str.strip().eq(specialist_initials)
+        else:
+            valid_intake = pd.Series(False, index=df_ncl.index)
+    
+    return int((in_range & retained_after & valid_intake).sum())
+
+def _intake_total_retained(df_ncl: pd.DataFrame, specialist: str) -> int:
+    """Row 10: Total PNCs who retained for this intake specialist"""
+    # This should equal Row 3 + Row 8
+    return _intake_retained_without_consult(df_ncl, specialist) + _intake_retained_after_consult(df_ncl, specialist)
+
+# --- Calculate intake metrics for all specialists ---
+intake_specialists = INTAKE_SPECIALISTS + ["Everyone Else"]
+intake_results = {}
+
+for specialist in intake_specialists:
+    row1 = _intake_pncs_by_specialist(df_leads, specialist)
+    row3 = _intake_retained_without_consult(df_ncl, specialist)
+    row4 = _intake_scheduled_consult(df_init, df_disc, specialist)
+    row6 = _intake_showed_consult(df_init, df_disc, specialist)
+    row8 = _intake_retained_after_consult(df_ncl, specialist)
+    row10 = _intake_total_retained(df_ncl, specialist)
+    
+    # Calculate percentages
+    row2 = _pct(row1, row2) if row2 > 0 else 0  # % of total PNCs
+    row5 = _pct(row4, (row1 - row3)) if (row1 - row3) > 0 else 0  # % of remaining PNCs who scheduled
+    row7 = _pct(row6, row4) if row4 > 0 else 0  # % who showed up
+    row9 = _pct(row8, row4) if row4 > 0 else 0  # % retained after consult
+    row11 = _pct(row10, row1) if row1 > 0 else 0  # % of total PNCs who retained
+    
+    intake_results[specialist] = {
+        "PNCs did intake": row1,
+        "% of total PNCs": row2,
+        "Retained without consult": row3,
+        "Scheduled consult": row4,
+        "% remaining scheduled": row5,
+        "Showed up": row6,
+        "% showed up": row7,
+        "Retained after consult": row8,
+        "% retained after consult": row9,
+        "Total retained": row10,
+        "% total retained": row11
+    }
+
+# --- Render intake report ---
+intake_specialists_display = ["ALL"] + intake_specialists
+selected_intake = st.selectbox("Select Intake Specialist", intake_specialists_display, key="intake_specialist_pick")
+
+if selected_intake == "ALL":
+    # Show summary for all specialists
+    st.subheader("Intake Summary - All Specialists")
+    
+    # Create summary table
+    summary_data = []
+    for specialist in intake_specialists:
+        data = intake_results[specialist]
+        summary_data.append({
+            "Intake Specialist": specialist,
+            "PNCs": data["PNCs did intake"],
+            "Scheduled": data["Scheduled consult"],
+            "Showed Up": data["Showed up"],
+            "Total Retained": data["Total retained"],
+            "Retention Rate": f"{data['% total retained']:.1f}%"
+        })
+    
+    summary_df = pd.DataFrame(summary_data)
+    st.dataframe(summary_df, use_container_width=True)
+    
+else:
+    # Show detailed metrics for selected specialist
+    st.subheader(f"Intake Metrics - {selected_intake}")
+    
+    data = intake_results[selected_intake]
+    
+    # Create KPI table
+    intake_kpi_rows = [
+        ("PNCs did intake", data["PNCs did intake"]),
+        ("% of total PNCs received", f"{data['% of total PNCs']:.1f}%"),
+        ("PNCs who retained without consultation", data["Retained without consult"]),
+        ("PNCs who scheduled consultation", data["Scheduled consult"]),
+        ("% of remaining PNCs who scheduled consult", f"{data['% remaining scheduled']:.1f}%"),
+        ("PNCs who showed up for consultation", data["Showed up"]),
+        ("% of PNCs who showed up for consultation", f"{data['% showed up']:.1f}%"),
+        ("PNCs retained after scheduled consultation", data["Retained after consult"]),
+        ("% of PNCs who retained after scheduled consult", f"{data['% retained after consult']:.1f}%"),
+        ("Total PNCs who retained", data["Total retained"]),
+        ("% of total PNCs received who retained", f"{data['% total retained']:.1f}%"),
+    ]
+    
+    intake_table_rows = "\n".join(
+        f"<tr><td>{_html_escape(k)}</td><td style='text-align:right'>{_html_escape(v)}</td></tr>"
+        for k, v in intake_kpi_rows
+    )
+    
+    intake_html_table = """
+    <style>
+    .intake-kpi-table { width: 100%; border-collapse: collapse; font-size: 0.95rem; }
+    .intake-kpi-table th, .intake-kpi-table td { border: 1px solid #eee; padding: 10px 12px; }
+    .intake-kpi-table th { background: #fafafa; text-align: left; font-weight: 600; }
+    </style>
+    <table class="intake-kpi-table">
+      <thead><tr><th>Metric</th><th>Value</th></tr></thead>
+      <tbody>
+        """ + intake_table_rows + """
+      </tbody>
+    </table>
+    """
+    st.markdown(intake_html_table, unsafe_allow_html=True)
