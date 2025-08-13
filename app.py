@@ -189,11 +189,11 @@ with st.expander("📤 Data Upload", expanded=False):
     
     # File uploaders
     uploaded_files = {}
-    uploaded_files["Leads_PNCs"] = st.file_uploader("Leads_PNCs.csv", type=["csv"], key="leads")
-    uploaded_files["New Clients List"] = st.file_uploader("New Clients List.xlsx", type=["xlsx"], key="ncl")
-    uploaded_files["Initial_Consultation"] = st.file_uploader("Initial_Consultation.csv", type=["csv"], key="init")
-    uploaded_files["Discovery_Meeting"] = st.file_uploader("Discovery_Meeting.csv", type=["csv"], key="disc")
-    uploaded_files["Call_Report"] = st.file_uploader("Call_Report.csv", type=["csv"], key="calls")
+    uploaded_files["Leads_PNCs"] = st.file_uploader("Leads_PNCs.csv", type=["csv"], key="leads_upload")
+    uploaded_files["New Clients List"] = st.file_uploader("New Clients List.xlsx", type=["xlsx"], key="ncl_upload")
+    uploaded_files["Initial_Consultation"] = st.file_uploader("Initial_Consultation.csv", type=["csv"], key="init_upload")
+    uploaded_files["Discovery_Meeting"] = st.file_uploader("Discovery_Meeting.csv", type=["csv"], key="disc_upload")
+    uploaded_files["Call_Report"] = st.file_uploader("Call_Report.csv", type=["csv"], key="calls_upload")
     
     # Upload options
     col1, col2 = st.columns(2)
