@@ -2139,22 +2139,6 @@ else:
         ("% of total PNCs received who retained", f"{data['% total retained']:.1f}%"),
     ]
     
-    intake_table_rows = "\n".join(
-        f"<tr><td>{_html_escape(k)}</td><td style='text-align:right'>{_html_escape(v)}</td></tr>"
-        for k, v in intake_rows
-    )
-    
-    intake_html_table = """
-    <style>
-    .intake-kpi-table { width: 100%; border-collapse: collapse; font-size: 0.95rem; }
-    .intake-kpi-table th, .intake-kpi-table td { border: 1px solid #eee; padding: 10px 12px; }
-    .intake-kpi-table th { background: #fafafa; text-align: left; font-weight: 600; }
-    </style>
-    <table class="intake-kpi-table">
-      <thead><tr><th>Metric</th><th>Value</th></tr></thead>
-      <tbody>
-        """ + intake_table_rows + """
-      </tbody>
-    </table>
-    """
-    st.markdown(intake_html_table, unsafe_allow_html=True)
+    # Create DataFrame for display
+    intake_df = pd.DataFrame(intake_rows, columns=["Metric", "Value"])
+    st.dataframe(intake_df, use_container_width=True, hide_index=True)
