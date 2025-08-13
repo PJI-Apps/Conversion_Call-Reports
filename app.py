@@ -111,12 +111,19 @@ def _gsheet_client_cached():
     if "client_email" not in sa:
         raise ValueError("Service account object missing 'client_email'")
     scopes = ["https://www.googleapis.com/auth/spreadsheets"]
-    creds = Credentials.from_service_account_info(sa, scopes)
+    creds = Credentials.from_service_account_info(sa, scopes=scopes)
     gc = gspread.authorize(creds)
     sh = gc.open_by_url(ms["sheet_url"])
     return gc, sh
 
-GC, GSHEET = _gsheet_client_cached()
+def _gsheet_client():
+    try:
+        return _gsheet_client_cached()
+    except Exception as e:
+        st.error(f"Google Sheets connection failed: {e}")
+        return None, None
+
+GC, GSHEET = _gsheet_client()
 
 def _ws(title: str):
     """Simplified worksheet getter/creator with better error handling."""
