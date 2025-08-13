@@ -218,7 +218,7 @@ def _read_ws_cached(sheet_url: str, tab_title: str, ver: int) -> pd.DataFrame:
     for c in df.columns:
         cl = c.lower()
         if "date" in cl or "with pji law" in cl or "batch" in cl:
-            df[c] = pd.to_datetime(df[c].map(_clean_datestr), errors="coerce")
+            df[c] = pd.to_datetime(df[c].map(_clean_datestr), errors="coerce", format="mixed")
     return df.dropna(how="all").fillna("")
 
 def _read_ws_by_name(logical_key: str) -> pd.DataFrame:
@@ -990,7 +990,7 @@ with row[2]:
     )
 
 week_defs = None
-sel_week_idx = 0
+sel_week_idx = 1
 if period_mode == "Week of month":
     week_defs = custom_weeks_for_month(sel_year_conv, sel_month_num)
     def _wk_label(i):
@@ -998,7 +998,7 @@ if period_mode == "Week of month":
         return f'{wk["label"]} ({sd.day}–{ed.day} {ed.strftime("%b")})'
     sel_week_idx = st.selectbox("Week of month",
                                 options=list(range(len(week_defs))),
-                                index=0, format_func=_wk_label)
+                                index=1, format_func=_wk_label)
 
 cust_cols = st.columns(2)
 custom_start = custom_end = None
@@ -1282,7 +1282,7 @@ def _to_ts(series: pd.Series) -> pd.Series:
     if not isinstance(series, pd.Series) or series.empty:
         return pd.to_datetime(pd.Series([], dtype=object))
     cleaned = series.astype(str).map(_clean_dt_text)
-    dt = pd.to_datetime(cleaned, errors="coerce", infer_datetime_format=True)
+    dt = pd.to_datetime(cleaned, errors="coerce", format="mixed")
     if dt.isna().any():
         y = dt.copy()
         for fmt in ("%m/%d/%Y %I:%M %p", "%m/%d/%Y %H:%M", "%Y-%m-%d %H:%M", "%m/%d/%Y"):
@@ -1689,7 +1689,7 @@ with st.expander("🔬 Estate Planning — inclusion audit (why met != your expe
         x = x.str.replace(r"\s+at\s+"," ", regex=True).str.replace(r"\s+(ET|EDT|EST|CT|CDT|CST|MT|MDT|MST|PT|PDT)\b","", regex=True)
         x = x.str.replace(r"(\d)(am|pm)\b", r"\1 \2", regex=True)
         x = x.str.replace(r"\s+"," ", regex=True).str.strip()
-        dt = pd.to_datetime(x, errors="coerce", infer_datetime_format=True)
+        dt = pd.to_datetime(x, errors="coerce", format="mixed")
         if dt.isna().any():
             y = dt.copy()
             for fmt in ("%m/%d/%Y %I:%M %p", "%m/%d/%Y %H:%M", "%Y-%m-%d %H:%M", "%m/%d/%Y"):
