@@ -1917,7 +1917,7 @@ st.markdown("---")
 st.header("📊 Conversion Trend Visualizations")
 
 # Date filter for visualizations
-viz_col1, viz_col2, viz_col3 = st.columns([2, 1, 1])
+viz_col1, viz_col2, viz_col3, viz_col4 = st.columns([2, 1, 1, 1])
 
 with viz_col1:
     viz_period_mode = st.radio(
@@ -1932,6 +1932,12 @@ with viz_col3:
         viz_month = st.selectbox("Month", month_nums, index=date.today().month-1, key="viz_month")
     elif viz_period_mode == "Quarterly":
         viz_quarter = st.selectbox("Quarter", ["Q1", "Q2", "Q3", "Q4"], key="viz_quarter")
+with viz_col4:
+    viz_practice_area = st.selectbox(
+        "Practice Area",
+        ["ALL", "Estate Planning", "Estate Administration", "Civil Litigation", "Business transactional", "Other"],
+        key="viz_practice_area"
+    )
 
 # Calculate date ranges for visualization
 def _get_viz_date_range():
@@ -1974,14 +1980,14 @@ if plotly_ok:
         fig1 = px.line(
             x=months, 
             y=retention_rates,
-            title="Retention Rate After Meeting (%)",
+            title=f"Retention Rate After Meeting (%) - {viz_practice_area}",
             labels={"x": "Month", "y": "Retention Rate (%)"},
             markers=True
         )
         fig1.update_layout(yaxis_range=[0, 25])
         st.plotly_chart(fig1, use_container_width=True)
         
-        st.caption("Data source: Main conversion report - % of PNCs who retained after scheduled consult")
+        st.caption(f"Data source: Main conversion report - % of PNCs who retained after scheduled consult | Practice Area: {viz_practice_area}")
     
     # 2. PNCs scheduled consults (%) trend
     with st.expander("📈 PNCs scheduled consults (%) trend", expanded=False):
@@ -1993,14 +1999,14 @@ if plotly_ok:
         fig2 = px.line(
             x=months, 
             y=scheduled_rates,
-            title="PNCs Scheduled Consultation (%)",
+            title=f"PNCs Scheduled Consultation (%) - {viz_practice_area}",
             labels={"x": "Month", "y": "Scheduled Rate (%)"},
             markers=True
         )
         fig2.update_layout(yaxis_range=[80, 100])
         st.plotly_chart(fig2, use_container_width=True)
         
-        st.caption("Data source: Intake section (ALL) - % of remaining PNCs who scheduled consult")
+        st.caption(f"Data source: Intake section (ALL) - % of remaining PNCs who scheduled consult | Practice Area: {viz_practice_area}")
     
     # 3. PNCs showed up trend (%)
     with st.expander("📈 PNCs showed up trend (%)", expanded=False):
@@ -2012,14 +2018,14 @@ if plotly_ok:
         fig3 = px.line(
             x=months, 
             y=show_up_rates,
-            title="PNCs Showed Up for Consultation (%)",
+            title=f"PNCs Showed Up for Consultation (%) - {viz_practice_area}",
             labels={"x": "Month", "y": "Show Up Rate (%)"},
             markers=True
         )
         fig3.update_layout(yaxis_range=[85, 100])
         st.plotly_chart(fig3, use_container_width=True)
         
-        st.caption("Data source: Intake section (ALL) - % of PNCs who showed up for consultation")
+        st.caption(f"Data source: Intake section (ALL) - % of PNCs who showed up for consultation | Practice Area: {viz_practice_area}")
 
 # ───────────────────────────────────────────────────────────────────────────────
 # 🔧 Debugging & Troubleshooting
