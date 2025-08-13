@@ -889,6 +889,62 @@ if not view_calls.empty:
 else:
     st.info("No rows match the current Calls filters.")
 
+st.subheader("Calls — Visualizations")
+try:
+    import plotly.express as px
+    plotly_ok = True
+except Exception:
+    plotly_ok = False
+    st.info("Charts unavailable (install `plotly>=5.22` in requirements.txt).")
+
+if not view_calls.empty and plotly_ok:
+    vol = (view_calls.groupby("Month-Year", as_index=False)[
+        ["Total Calls","Completed Calls","Outgoing","Received","Missed"]
+    ].sum())
+    vol["_ym"] = pd.to_datetime(vol["Month-Year"]+"-01", format="%Y-%m-%d", errors="coerce")
+    vol = vol.sort_values("_ym")
+    vol_long = vol.melt(id_vars=["Month-Year","_ym"],
+                        value_vars=["Total Calls","Completed Calls","Outgoing","Received","Missed"],
+                        var_name="Metric", value_name="Count")
+    with st.expander("📈 Call volume trend over time", expanded=False):
+        fig1 = px.line(vol_long, x="_ym", y="Count", color="Metric", markers=True,
+                       labels={"_ym":"Month","Count":"Calls"})
+        fig1.update_layout(xaxis=dict(tickformat="%b %Y"))
+        st.plotly_chart(fig1, use_container_width=True)
+
+    comp = view_calls.groupby("Name", as_index=False)[["Completed Calls", "Total Calls"]].sum()
+    if comp.empty or not {"Completed Calls","Total Calls"} <= set(comp.columns):
+        with st.expander("✅ Completion rate by staff", expanded=False):
+            st.info("No data available to compute completion rates for the current filters.")
+    else:
+        c_done = pd.to_numeric(comp["Completed Calls"], errors="coerce").fillna(0.0)
+        c_tot  = pd.to_numeric(comp["Total Calls"], errors="coerce").fillna(0.0)
+        comp["Completion Rate (%)"] = (c_done / c_tot.where(c_tot != 0, pd.NA) * 100).fillna(0.0)
+        comp = comp.sort_values("Completion Rate (%)", ascending=False)
+        with st.expander("✅ Completion rate by staff", expanded=False):
+            fig2 = px.bar(comp, x="Name", y="Completion Rate (%)",
+                          labels={"Name":"Staff","Completion Rate (%)":"Completion Rate (%)"})
+            fig2.update_layout(xaxis={'categoryorder':'array','categoryarray':comp["Name"].tolist()})
+            st.plotly_chart(fig2, use_container_width=True)
+
+    tmp = view_calls.copy()
+    tmp["__avg_sec"]   = pd.to_numeric(tmp.get("__avg_sec", 0), errors="coerce").fillna(0.0)
+    tmp["Total Calls"] = pd.to_numeric(tmp.get("Total Calls", 0), errors="coerce").fillna(0.0)
+    tmp["weighted_sum"] = tmp["__avg_sec"] * tmp["Total Calls"]
+    by = tmp.groupby("Name", as_index=False).agg(
+        weighted_sum=("weighted_sum", "sum"),
+        total_calls=("Total Calls", "sum"),
+    )
+    by["Avg Minutes"] = by.apply(
+        lambda r: (r["weighted_sum"] / r["total_calls"] / 60.0) if r["total_calls"] > 0 else 0.0,
+        axis=1,
+    )
+    by = by.sort_values("Avg Minutes", ascending=False)
+    with st.expander("⏱️ Average call duration by staff (minutes)", expanded=False):
+        fig3 = px.bar(by, x="Avg Minutes", y="Name", orientation="h",
+                      labels={"Avg Minutes":"Minutes","Name":"Staff"})
+        st.plotly_chart(fig3, use_container_width=True)
+
 # ───────────────────────────────────────────────────────────────────────────────
 # Conversion Report
 # ───────────────────────────────────────────────────────────────────────────────
