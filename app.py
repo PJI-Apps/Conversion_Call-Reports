@@ -1401,28 +1401,83 @@ def _retained_counts_from_ncl_fuzzy(ncl_df: pd.DataFrame, sd, ed) -> dict:
 
 # ---------- Build counts + report safely ----------
 try:
-    _met_counts = _met_counts_from_ic_dm_fuzzy(df_init, df_disc, start_date, end_date)
-    _ret_counts = _retained_counts_from_ncl_fuzzy(df_ncl, start_date, end_date)
+def _met_counts_from_ic_dm_fuzzy(ic_df: pd.DataFrame, dm_df: pd.DataFrame, sd, ed) -> dict:
+    """Count 'PNCs who met' per attorney from IC+DM with fuzzy columns + robust dates.
+       Now explicitly avoids DM *Rescheduled* column, and hard-fallbacks to index P (15)."""
+    buckets = []
+    global _last_ic_dm_debug
+    _last_ic_dm_debug = {}
 
-    met_by_attorney      = {name: int(_met_counts.get(name, 0)) for name in CANON}
-    retained_by_attorney = {name: int(_ret_counts.get(name, 0)) for name in CANON}
+    def _one(df, source, date_patterns, att_patterns, prefer_exact=None, avoid_resched=False, hard_fallback_idx=None):
+        # attorney and date columns
+        att = _pick_col_strict(df, att_patterns)
+        date = _pick_col_strict(
+            df,
+            must_have_tokens=date_patterns,
+            avoid_tokens=(["resched","reschedule","rescheduled"] if avoid_resched else None),
+            prefer_exact=(prefer_exact or [])
+        )
 
-    report = pd.DataFrame({"Attorney": CANON})
-    report["PNCs who met"] = report["Attorney"].map(lambda a: met_by_attorney.get(a, 0))
-    report["PNCs who met and retained"] = report["Attorney"].map(lambda a: retained_by_attorney.get(a, 0))
-    report["Practice Area"] = report["Attorney"].map(_practice_for)
-    report["Attorney_Display"] = report["Attorney"].map(_display_safe)
+        # if DM date still came back as a *rescheduled* field, ditch it
+        if source == "DM" and date and ("resched" in _norm_header(date)):
+            date = None
 
-except Exception as e:
-    st.error("Practice Area: failed to build counts/report.")
-    st.exception(e)
-    # ensure 'report' exists to avoid NameError downstream
-    report = pd.DataFrame({"Attorney": CANON, "PNCs who met": 0, "PNCs who met and retained": 0,
-                           "Practice Area": [ _practice_for(a) for a in CANON ],
-                           "Attorney_Display": [ _display_safe(a) for a in CANON ]})
+        # HARD FALLBACK: use index P (15) for DM date if nothing acceptable found
+        if date is None and hard_fallback_idx is not None and df.shape[1] > hard_fallback_idx:
+            date = df.columns[hard_fallback_idx]
 
-with st.expander("🔎 IC/DM parser debug (current window)", expanded=False):
-    st.write(_last_ic_dm_debug if "_last_ic_dm_debug" in globals() else {})
+        # optional filters
+        sub = _pick_col_strict(df, ["sub","status"])
+        rsn = _pick_col_strict(df, ["reason","resched"])
+
+        dbg = {"source": source, "att_col": att, "date_col": date, "sub_col": sub, "reason_col": rsn}
+        if att and date:
+            t = df.copy()
+            in_range = _between_inclusive(t[date], sd, ed)
+            ex_follow = (t[sub].astype(str).str.strip().str.lower().eq("follow up")) if sub else pd.Series(False, index=t.index)
+            ex_reason = (~_is_blank(t[rsn])) if rsn else pd.Series(False, index=t.index)
+            met_mask = in_range & ~ex_follow & ~ex_reason
+            dbg |= {
+                "total_rows": int(len(df)),
+                "in_range": int(in_range.sum()),
+                "excluded_followup": int(ex_follow.sum()) if sub else 0,
+                "excluded_reason": int(ex_reason.sum()) if rsn else 0,
+                "met_rows": int(met_mask.sum()),
+            }
+            _last_ic_dm_debug[source] = dbg
+            return t.loc[met_mask, att].astype(str).str.strip()
+
+        _last_ic_dm_debug[source] = dbg
+        return pd.Series(dtype=str)
+
+    # IC — prefer the canonical IC date; resched is never a valid IC date
+    if isinstance(ic_df, pd.DataFrame) and not ic_df.empty:
+        buckets.append(_one(
+            ic_df, "IC",
+            date_patterns=["initial","consultation"],
+            att_patterns=["lead","attorney"],
+            prefer_exact=["initial consultation with pji law"],
+            avoid_resched=True,
+            hard_fallback_idx=None  # IC has no fixed index fallback we trust
+        ))
+
+    # DM — prefer the canonical DM date; avoid rescheduled; HARD FALLBACK to index P (15)
+    if isinstance(dm_df, pd.DataFrame) and not dm_df.empty:
+        buckets.append(_one(
+            dm_df, "DM",
+            date_patterns=["discovery","meeting"],
+            att_patterns=["lead","attorney"],
+            prefer_exact=["discovery meeting with pji law"],
+            avoid_resched=True,
+            hard_fallback_idx=15  # <- P column when present
+        ))
+
+    if not buckets:
+        return {}
+    met_series = pd.concat(buckets, ignore_index=True)
+    met_series = met_series[met_series.ne("")]
+    return met_series.value_counts(dropna=False).to_dict()
+
 
 # ========== EMERGENCY IC/DM SANITY + SIDE-BY-SIDE COUNTS (does not remove anything) ==========
 
