@@ -1250,8 +1250,10 @@ INITIALS_TO_ATTORNEY = {
     "RB":"Robert Brown","JS":"Justine Sennott","PA":"Paul Abraham",
 }
 
-# Canonical list (stable order)
-CANON = list(dict.fromkeys(sum(PRACTICE_AREAS.values(), []) + OTHER_ATTORNEYS))
+# Canonical list (stable order) - include all attorneys from practice areas
+CANON = list(dict.fromkeys(sum(PRACTICE_AREAS.values(), [])))
+# Add "Other" as a special category for attorneys not in predefined lists
+CANON.append("Other")
 
 # --- Robust helpers (dates & blank) ---
 import re as _re
@@ -1365,15 +1367,36 @@ def _retained_counts_from_ncl(ncl_df: pd.DataFrame, sd: date, ed: date) -> Dict[
         if cands:
             cands.sort(key=lambda c: len(norms[c]))
             date_col = cands[0]
+    if date_col is None:
+        # Fallback: look for any column with "date" in the name
+        date_col = next((c for c in cols if "date" in norms[c]), None)
+    if date_col is None:
+        # Fallback: try to find column G (index 6) if it exists
+        if len(cols) > 6:
+            date_col = cols[6]  # Column G
 
-    # Responsible Attorney (initials)
+    # Responsible Attorney (initials) - try multiple approaches
     init_col = next((c for c in cols if all(tok in norms[c] for tok in ["responsible","attorney"])), None)
+    if init_col is None:
+        # Fallback: look for any column with "attorney" in the name
+        init_col = next((c for c in cols if "attorney" in norms[c]), None)
+    if init_col is None:
+        # Fallback: try to find column E (index 4) if it exists
+        if len(cols) > 4:
+            init_col = cols[4]  # Column E
 
     # Retained flag (prefer exact)
     prefer_flag = _norm("Retained With Consult (Y/N)")
     flag_col = next((c for c in cols if norms[c] == prefer_flag), None)
     if flag_col is None:
         flag_col = next((c for c in cols if all(tok in norms[c] for tok in ["retained","consult"])), None)
+    if flag_col is None:
+        # Fallback: look for any column with "retained" in the name
+        flag_col = next((c for c in cols if "retained" in norms[c]), None)
+    if flag_col is None:
+        # Fallback: try to find column F (index 5) if it exists
+        if len(cols) > 5:
+            flag_col = cols[5]  # Column F
 
     if not (date_col and init_col and flag_col):
         return {name: 0 for name in CANON}
@@ -1389,23 +1412,41 @@ def _retained_counts_from_ncl(ncl_df: pd.DataFrame, sd: date, ed: date) -> Dict[
 
     mapped = t.loc[m, init_col].map(_ini_to_name)
     vc = mapped.value_counts(dropna=False)
-    return {name: int(vc.get(name, 0)) for name in CANON}
+    
+    # Initialize all attorneys with 0, then update with actual counts
+    result = {name: 0 for name in CANON}
+    for name, count in vc.items():
+        if name in result:
+            result[name] = int(count)
+        else:
+            # If attorney not in CANON, add to "Other" count
+            result["Other"] = result.get("Other", 0) + int(count)
+    
+    return result
 
 # --- Build counts & report ---
 met_counts_raw = _met_counts_from_ic_dm_index(df_init, df_disc, start_date, end_date)
-met_by_attorney = {name: int(met_counts_raw.get(name, 0)) for name in CANON}
+met_by_attorney = {name: 0 for name in CANON}  # Initialize all attorneys with 0
+
+# Distribute counts to appropriate attorneys, aggregating unknown ones to "Other"
+for name, count in met_counts_raw.items():
+    if name in CANON:
+        met_by_attorney[name] = int(count)
+    else:
+        # If attorney not in CANON, add to "Other" count
+        met_by_attorney["Other"] = met_by_attorney.get("Other", 0) + int(count)
 
 retained_by_attorney = _retained_counts_from_ncl(df_ncl, start_date, end_date)
 
 report = pd.DataFrame({
     "Attorney": CANON,
-    "Practice Area": [ _practice_for(a) for a in CANON ],
+    "Practice Area": [ _practice_for(a) if a != "Other" else "Other" for a in CANON ],
 })
 report["PNCs who met"] = report["Attorney"].map(lambda a: int(met_by_attorney.get(a, 0)))
 report["PNCs who met and retained"] = report["Attorney"].map(lambda a: int(retained_by_attorney.get(a, 0)))
-report["Attorney_Display"] = report["Attorney"].map(_disp)
+report["Attorney_Display"] = report["Attorney"].map(lambda a: "Other" if a == "Other" else _disp(a))
 report["% of PNCs who met and retained"] = report.apply(
-    lambda r: 0.0 if int(r["PNCs who met"]) == 0
+    lambda r: 0.0 if int(r["PNCs who met"]) == 0  # Use individual attorney's "met with" count as denominator
               else round((int(r["PNCs who met and retained"]) / int(r["PNCs who met"])) * 100.0, 2),
     axis=1
 )
@@ -1444,7 +1485,9 @@ for pa in ["Estate Planning","Estate Administration","Civil Litigation","Busines
         attys = ["ALL"] + sub["Attorney_Display"].tolist()
         pick = st.selectbox(f"{pa} — choose attorney", attys, key=f"pa_pick_{pa.replace(' ','_')}")
         if pick == "ALL":
-            _render_three_row_card("ALL", met_sum, kept_sum, pct_sum)
+            # For ALL, calculate percentage based on practice area's total "met with" count
+            pct_all = 0.0 if met_sum == 0 else round((kept_sum / met_sum) * 100.0, 2)
+            _render_three_row_card("ALL", met_sum, kept_sum, pct_all)
         else:
             rowx = sub.loc[sub["Attorney_Display"] == pick].iloc[0]
             _render_three_row_card(
@@ -1460,10 +1503,38 @@ with st.expander("🔧 IC/DM sanity (per sheet & PA) — current window", expand
     dm_L = _col_by_idx(df_disc, 11); dm_P = _col_by_idx(df_disc, 15)
     st.write("IC Lead (L):", ic_L, "IC Date (M):", ic_M)
     st.write("DM Lead (L):", dm_L, "DM Date (P):", dm_P)
+    st.write("Date range filter:", start_date, "to", end_date)
+    st.write("Raw met counts from function:", met_counts_raw)
     st.write("Per-attorney MET (IC+DM index-based):", met_by_attorney, "TOTAL =", sum(met_by_attorney.values()))
     for pa in ["Estate Planning","Estate Administration","Civil Litigation","Business transactional","Other"]:
         names = [n for n in CANON if _practice_for(n) == pa]
-        st.write(pa, "met =", sum(met_by_attorney.get(n, 0) for n in names), "by", {n: met_by_attorney.get(n, 0) for n in names})
+        pa_total = sum(met_by_attorney.get(n, 0) for n in names)
+        st.write(pa, "met =", pa_total, "by", {n: met_by_attorney.get(n, 0) for n in names})
+        
+        # Show breakdown by source (IC vs DM) for Estate Planning
+        if pa == "Estate Planning":
+            st.write("--- Estate Planning breakdown ---")
+            ep_names = ["Connor Watkins", "Jennifer Fox", "Rebecca Megel"]
+            
+            # Check IC data
+            if isinstance(df_init, pd.DataFrame) and df_init.shape[1] >= 13:
+                ic_att, ic_dtc, ic_sub, ic_rsn = df_init.columns[11], df_init.columns[12], df_init.columns[6], df_init.columns[8]
+                ic_t = df_init.copy()
+                ic_m = _between_inclusive(ic_t[ic_dtc], start_date, end_date)
+                ic_m &= ~ic_t[ic_sub].astype(str).str.strip().str.lower().eq("follow up")
+                ic_m &= _is_blank(ic_t[ic_rsn])
+                ic_ep = ic_t.loc[ic_m & ic_t[ic_att].astype(str).str.strip().isin(ep_names)]
+                st.write("IC - EP attorneys in range:", ic_ep[ic_att].value_counts().to_dict())
+            
+            # Check DM data
+            if isinstance(df_disc, pd.DataFrame) and df_disc.shape[1] >= 16:
+                dm_att, dm_dtc, dm_sub, dm_rsn = df_disc.columns[11], df_disc.columns[15], df_disc.columns[6], df_disc.columns[8]
+                dm_t = df_disc.copy()
+                dm_m = _between_inclusive(dm_t[dm_dtc], start_date, end_date)
+                dm_m &= ~dm_t[dm_sub].astype(str).str.strip().str.lower().eq("follow up")
+                dm_m &= _is_blank(dm_t[dm_rsn])
+                dm_ep = dm_t.loc[dm_m & dm_t[dm_att].astype(str).str.strip().isin(ep_names)]
+                st.write("DM - EP attorneys in range:", dm_ep[dm_att].value_counts().to_dict())
 
 with st.expander("🔧 NCL retained sanity — headers & sample", expanded=False):
     if isinstance(df_ncl, pd.DataFrame) and not df_ncl.empty:
@@ -1475,25 +1546,52 @@ with st.expander("🔧 NCL retained sanity — headers & sample", expanded=False
             s = _re.sub(r"[^a-z0-9 ]", "", s); 
             return s
         cols = list(df_ncl.columns); norms = {c: _norm(c) for c in cols}
+        
+        # Show what columns were found with each approach
         prefer_date = _norm("Date we had BOTH the signed CLA and full payment")
         picked_date = next((c for c in cols if norms[c] == prefer_date), None)
         if picked_date is None:
             cands = [c for c in cols if all(tok in norms[c] for tok in ["date","signed","payment"])]
             if cands:
                 cands.sort(key=lambda c: len(norms[c])); picked_date = cands[0]
+        if picked_date is None:
+            picked_date = next((c for c in cols if "date" in norms[c]), None)
+        if picked_date is None and len(cols) > 6:
+            picked_date = cols[6]  # Column G
+            
         picked_init = next((c for c in cols if all(tok in norms[c] for tok in ["responsible","attorney"])), None)
+        if picked_init is None:
+            picked_init = next((c for c in cols if "attorney" in norms[c]), None)
+        if picked_init is None and len(cols) > 4:
+            picked_init = cols[4]  # Column E
+            
         prefer_flag = _norm("Retained With Consult (Y/N)")
         picked_flag = next((c for c in cols if norms[c] == prefer_flag), None)
         if picked_flag is None:
             picked_flag = next((c for c in cols if all(tok in norms[c] for tok in ["retained","consult"])), None)
+        if picked_flag is None:
+            picked_flag = next((c for c in cols if "retained" in norms[c]), None)
+        if picked_flag is None and len(cols) > 5:
+            picked_flag = cols[5]  # Column F
+            
         st.write("Picked columns → date:", picked_date, " initials:", picked_init, " flag:", picked_flag)
+        st.write("Date range filter:", start_date, "to", end_date)
 
         if picked_date and picked_init and picked_flag:
             t = df_ncl.copy()
             in_range = _between_inclusive(t[picked_date], start_date, end_date)
             kept = t[picked_flag].astype(str).str.strip().str.upper().ne("N")
+            st.write("Rows in date range:", in_range.sum())
+            st.write("Rows with retained flag != 'N':", kept.sum())
+            st.write("Rows meeting both criteria:", (in_range & kept).sum())
+            
             sample = t.loc[in_range & kept, [picked_init, picked_flag, picked_date]].head(20)
             st.write("First 20 rows in range & kept:", sample)
+            
+            # Show some sample data from the picked columns
+            st.write("Sample data from picked columns:")
+            sample_all = t[[picked_init, picked_flag, picked_date]].head(10)
+            st.write(sample_all)
     else:
         st.write("No NCL rows loaded for the current window.")
 
