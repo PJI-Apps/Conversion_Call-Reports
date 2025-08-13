@@ -1475,365 +1475,69 @@ for pa in ["Estate Planning","Estate Administration","Civil Litigation","Busines
             )
 
 # ───────────────────────────────────────────────────────────────────────────────
-# 📊 Conversion Data Visualizations
+# Practice Area Report
 # ───────────────────────────────────────────────────────────────────────────────
 st.markdown("---")
-st.header("📊 Conversion Data Visualizations")
+st.header("🏛️ Practice Area Report")
 
-# Check if plotly is available
-try:
-    import plotly.express as px
-    import plotly.graph_objects as go
-    from plotly.subplots import make_subplots
-    plotly_ok = True
-except Exception:
-    plotly_ok = False
-    st.info("Charts unavailable (install `plotly>=5.22` in requirements.txt).")
-
-if plotly_ok:
-    # Create tabs for different visualization types
-    viz_tab1, viz_tab2, viz_tab3 = st.tabs(["📈 Monthly Trends", "👥 Practice Area Performance", "📊 Attorney Performance"])
+# Create the practice area report DataFrame
+report_data = []
+for pa in ["Estate Planning", "Estate Administration", "Civil Litigation", "Business transactional", "Other"]:
+    names = [n for n in CANON if _practice_for(n) == pa]
+    for name in names:
+        met = met_by_attorney.get(name, 0)
+        retained = retained_by_attorney.get(name, 0)
+        pct = round((retained / met * 100) if met > 0 else 0, 2)
+        report_data.append({
+            "Practice Area": pa,
+            "Attorney_Display": Attorney_Display(name),
+            "PNCs who met": met,
+            "PNCs who met and retained": retained,
+            "% of PNCs who met and retained": pct
+        })
     
-    with viz_tab1:
-        st.subheader("Monthly Trends")
-        
-        # Time period selector
-        col1, col2 = st.columns(2)
-        with col1:
-            trend_period = st.selectbox(
-                "View Period",
-                ["Year to Date", "Month to Date", "Last 12 Months"],
-                key="trend_period"
-            )
-        with col2:
-            trend_metric = st.selectbox(
-                "Primary Metric",
-                ["Retained After Meeting", "PNCs Showed Up", "Conversion Rate"],
-                key="trend_metric"
-            )
-        
-        # Calculate date range for trends
-        today = date.today()
-        if trend_period == "Year to Date":
-            trend_start = date(today.year, 1, 1)
-            trend_end = today
-        elif trend_period == "Month to Date":
-            trend_start = date(today.year, today.month, 1)
-            trend_end = today
-        else:  # Last 12 Months
-            trend_start = date(today.year - 1, today.month, today.day)
-            trend_end = today
-        
-        # Prepare monthly data for trends
-        monthly_data = []
-        
-        # Generate monthly buckets
-        current_date = trend_start.replace(day=1)
-        while current_date <= trend_end:
-            month_end = (current_date.replace(day=28) + pd.Timedelta(days=4)).replace(day=1) - pd.Timedelta(days=1)
-            month_end = min(month_end, trend_end)
-            
-            # Calculate metrics for this month
-            month_start = current_date
-            month_end_date = month_end
-            
-            # Get data for this month
-            month_init = df_init.loc[_between_inclusive(df_init.iloc[:, 12], month_start, month_end_date)] if not df_init.empty else pd.DataFrame()
-            month_disc = df_disc.loc[_between_inclusive(df_disc.iloc[:, 15], month_start, month_end_date)] if not df_disc.empty else pd.DataFrame()
-            month_ncl = df_ncl.loc[_between_inclusive(df_ncl.iloc[:, 6], month_start, month_end_date)] if not df_ncl.empty else pd.DataFrame()
-            
-            # Calculate metrics
-            total_met = len(month_init) + len(month_disc)
-            total_retained = len(month_ncl) if not month_ncl.empty else 0
-            conversion_rate = (total_retained / total_met * 100) if total_met > 0 else 0
-            
-            monthly_data.append({
-                'Month': current_date.strftime('%Y-%m'),
-                'Month_Date': current_date,
-                'Total_Met': total_met,
-                'Total_Retained': total_retained,
-                'Conversion_Rate': conversion_rate
-            })
-            
-            # Move to next month
-            current_date = (current_date.replace(day=28) + pd.Timedelta(days=4)).replace(day=1)
-        
-        if monthly_data:
-            df_trends = pd.DataFrame(monthly_data)
-            
-            # Create trend chart
-            if trend_metric == "Retained After Meeting":
-                y_col = 'Total_Retained'
-                title = "Monthly Trend: Retained After Meeting"
-            elif trend_metric == "PNCs Showed Up":
-                y_col = 'Total_Met'
-                title = "Monthly Trend: PNCs Showed Up"
-            else:  # Conversion Rate
-                y_col = 'Conversion_Rate'
-                title = "Monthly Trend: Conversion Rate (%)"
-            
-            fig = px.line(df_trends, x='Month', y=y_col, 
-                         title=title,
-                         markers=True,
-                         labels={'Month': 'Month', y_col: trend_metric})
-            fig.update_layout(height=400)
-            st.plotly_chart(fig, use_container_width=True)
-            
-            # Show data table
-            st.subheader("Monthly Data")
-            display_df = df_trends.copy()
-            display_df['Month'] = display_df['Month_Date'].dt.strftime('%B %Y')
-            display_df = display_df[['Month', 'Total_Met', 'Total_Retained', 'Conversion_Rate']]
-            display_df.columns = ['Month', 'PNCs Showed Up', 'Retained After Meeting', 'Conversion Rate (%)']
-            st.dataframe(display_df, use_container_width=True)
-        else:
-            st.info("No data available for the selected time period.")
-    
-    with viz_tab2:
-        st.subheader("Practice Area Performance")
-        
-        # Practice area performance chart
-        practice_metrics = []
-        for pa in ["Estate Planning", "Estate Administration", "Civil Litigation", "Business transactional", "Other"]:
-            pa_sub = report.loc[report["Practice Area"] == pa].copy()
-            met_sum = int(pa_sub["PNCs who met"].sum())
-            kept_sum = int(pa_sub["PNCs who met and retained"].sum())
-            pct_sum = 0.0 if met_sum == 0 else round((kept_sum / met_sum) * 100.0, 2)
-            
-            practice_metrics.append({
-                'Practice Area': pa,
-                'PNCs Met': met_sum,
-                'Retained': kept_sum,
-                'Conversion Rate (%)': pct_sum
-            })
-        
-        if practice_metrics:
-            df_practice = pd.DataFrame(practice_metrics)
-            
-            # Bar chart for practice areas
-            fig = px.bar(df_practice, x='Practice Area', y='Conversion Rate (%)',
-                        title='Conversion Rate by Practice Area',
-                        color='Practice Area',
-                        text='Conversion Rate (%)')
-            fig.update_traces(texttemplate='%{text:.1f}%', textposition='outside')
-            fig.update_layout(height=400, showlegend=False)
-            st.plotly_chart(fig, use_container_width=True)
-            
-            # Show practice area data
-            st.dataframe(df_practice, use_container_width=True)
-    
-    with viz_tab3:
-        st.subheader("Attorney Performance")
-        
-        # Filter by practice area
-        pa_filter = st.selectbox(
-            "Filter by Practice Area",
-            ["All Practice Areas"] + ["Estate Planning", "Estate Administration", "Civil Litigation", "Business transactional", "Other"],
-            key="attorney_pa_filter"
-        )
-        
-        # Filter attorney data
-        if pa_filter == "All Practice Areas":
-            attorney_data = report.copy()
-        else:
-            attorney_data = report.loc[report["Practice Area"] == pa_filter].copy()
-        
-        if not attorney_data.empty:
-            # Create attorney performance chart
-            fig = px.scatter(attorney_data, 
-                           x='PNCs who met', 
-                           y='% of PNCs who met and retained',
-                           size='PNCs who met and retained',
-                           color='Practice Area',
-                           hover_name='Attorney_Display',
-                           title='Attorney Performance: Volume vs Conversion Rate',
-                           labels={'PNCs who met': 'PNCs Met', 
-                                  '% of PNCs who met and retained': 'Conversion Rate (%)',
-                                  'PNCs who met and retained': 'Retained'})
-            fig.update_layout(height=500)
-            st.plotly_chart(fig, use_container_width=True)
-            
-            # Show attorney data
-            st.dataframe(attorney_data[['Attorney_Display', 'Practice Area', 'PNCs who met', 
-                                       'PNCs who met and retained', '% of PNCs who met and retained']], 
-                        use_container_width=True)
-        else:
-            st.info("No attorney data available for the selected practice area.")
+    # Add "ALL" row for each practice area
+    pa_met_sum = sum(met_by_attorney.get(n, 0) for n in names)
+    pa_retained_sum = sum(retained_by_attorney.get(n, 0) for n in names)
+    pa_pct = round((pa_retained_sum / pa_met_sum * 100) if pa_met_sum > 0 else 0, 2)
+    report_data.append({
+        "Practice Area": pa,
+        "Attorney_Display": "ALL",
+        "PNCs who met": pa_met_sum,
+        "PNCs who met and retained": pa_retained_sum,
+        "% of PNCs who met and retained": pa_pct
+    })
 
-# ───────────────────────────────────────────────────────────────────────────────
-# 🔧 Debugging Section
-# ───────────────────────────────────────────────────────────────────────────────
-with st.expander("🔧 Debugging & Troubleshooting", expanded=False):
-    st.caption("Technical details for troubleshooting and verification. Collapsed by default for cleaner UI.")
-    
-    # IC/DM sanity check
-    with st.expander("📊 IC/DM Sanity Check", expanded=False):
-        ic_L = _col_by_idx(df_init, 11); ic_M = _col_by_idx(df_init, 12)
-        dm_L = _col_by_idx(df_disc, 11); dm_P = _col_by_idx(df_disc, 15)
-        st.write("IC Lead (L):", ic_L, "IC Date (M):", ic_M)
-        st.write("DM Lead (L):", dm_L, "DM Date (P):", dm_P)
-        st.write("Date range filter:", start_date, "to", end_date)
-        st.write("Raw met counts from function:", met_counts_raw)
-        st.write("Per-attorney MET (IC+DM index-based):", met_by_attorney, "TOTAL =", sum(met_by_attorney.values()))
-        for pa in ["Estate Planning","Estate Administration","Civil Litigation","Business transactional","Other"]:
-            names = [n for n in CANON if _practice_for(n) == pa]
-            pa_total = sum(met_by_attorney.get(n, 0) for n in names)
-            st.write(pa, "met =", pa_total, "by", {n: met_by_attorney.get(n, 0) for n in names})
+report = pd.DataFrame(report_data)
+
+# Display practice area sections
+for pa in ["Estate Planning", "Estate Administration", "Civil Litigation", "Business transactional", "Other"]:
+    pa_data = report.loc[report["Practice Area"] == pa].copy()
+    if not pa_data.empty:
+        with st.expander(f"🏛️ {pa}", expanded=False):
+            # Filter by attorney
+            attorneys = ["ALL"] + list(pa_data.loc[pa_data["Attorney_Display"] != "ALL", "Attorney_Display"])
+            selected_attorney = st.selectbox(f"Select {pa} Attorney", attorneys, key=f"attorney_{pa}")
             
-            # Show breakdown by source (IC vs DM) for Estate Planning
-            if pa == "Estate Planning":
-                st.write("--- Estate Planning breakdown ---")
-                ep_names = ["Connor Watkins", "Jennifer Fox", "Rebecca Megel"]
+            if selected_attorney == "ALL":
+                display_data = pa_data.loc[pa_data["Attorney_Display"] == "ALL"]
+            else:
+                display_data = pa_data.loc[pa_data["Attorney_Display"] == selected_attorney]
+            
+            if not display_data.empty:
+                row = display_data.iloc[0]
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.metric("PNCs who met with 'Attorney Name'", row["PNCs who met"])
+                with col2:
+                    st.metric("PNCs who met with 'Attorney Name' and retained", row["PNCs who met and retained"])
+                with col3:
+                    st.metric("% of PNCs who met with 'Attorney Name' and retained", f"{row['% of PNCs who met and retained']}%")
                 
-                # Check IC data
-                if isinstance(df_init, pd.DataFrame) and df_init.shape[1] >= 13:
-                    ic_att, ic_dtc, ic_sub, ic_rsn = df_init.columns[11], df_init.columns[12], df_init.columns[6], df_init.columns[8]
-                    ic_t = df_init.copy()
-                    ic_m = _between_inclusive(ic_t[ic_dtc], start_date, end_date)
-                    ic_m &= ~ic_t[ic_sub].astype(str).str.strip().str.lower().eq("follow up")
-                    ic_m &= _is_blank(ic_t[ic_rsn])
-                    ic_ep = ic_t.loc[ic_m & ic_t[ic_att].astype(str).str.strip().isin(ep_names)]
-                    st.write("IC - EP attorneys in range:", ic_ep[ic_att].value_counts().to_dict())
-                
-                # Check DM data
-                if isinstance(df_disc, pd.DataFrame) and df_disc.shape[1] >= 16:
-                    dm_att, dm_dtc, dm_sub, dm_rsn = df_disc.columns[11], df_disc.columns[15], df_disc.columns[6], df_disc.columns[8]
-                    dm_t = df_disc.copy()
-                    dm_m = _between_inclusive(dm_t[dm_dtc], start_date, end_date)
-                    dm_m &= ~dm_t[dm_sub].astype(str).str.strip().str.lower().eq("follow up")
-                    dm_m &= _is_blank(dm_t[dm_rsn])
-                    dm_ep = dm_t.loc[dm_m & dm_t[dm_att].astype(str).str.strip().isin(ep_names)]
-                    st.write("DM - EP attorneys in range:", dm_ep[dm_att].value_counts().to_dict())
+                # Show detailed breakdown
+                st.subheader("Detailed Breakdown")
+                st.dataframe(pa_data, use_container_width=True)
+            else:
+                st.info(f"No data available for {selected_attorney} in {pa}")
 
-    # NCL retained sanity check
-    with st.expander("📋 NCL Retained Sanity Check", expanded=False):
-        if isinstance(df_ncl, pd.DataFrame) and not df_ncl.empty:
-            st.write("NCL columns (index → name):", {i: c for i, c in enumerate(df_ncl.columns)})
-            # Show which headers were picked and the first 20 included rows
-            def _norm(s): 
-                s = str(s).lower().strip(); 
-                s = _re.sub(r"[\s_]+", " ", s); 
-                s = _re.sub(r"[^a-z0-9 ]", "", s); 
-                return s
-            cols = list(df_ncl.columns); norms = {c: _norm(c) for c in cols}
-            
-            # Show what columns were found with each approach
-            prefer_date = _norm("Date we had BOTH the signed CLA and full payment")
-            picked_date = next((c for c in cols if norms[c] == prefer_date), None)
-            if picked_date is None:
-                cands = [c for c in cols if all(tok in norms[c] for tok in ["date","signed","payment"])]
-                if cands:
-                    cands.sort(key=lambda c: len(norms[c])); picked_date = cands[0]
-            if picked_date is None:
-                picked_date = next((c for c in cols if "date" in norms[c]), None)
-            if picked_date is None and len(cols) > 6:
-                picked_date = cols[6]  # Column G
-                
-            picked_init = next((c for c in cols if all(tok in norms[c] for tok in ["responsible","attorney"])), None)
-            if picked_init is None:
-                picked_init = next((c for c in cols if "attorney" in norms[c]), None)
-            if picked_init is None and len(cols) > 4:
-                picked_init = cols[4]  # Column E
-                
-            prefer_flag = _norm("Retained With Consult (Y/N)")
-            picked_flag = next((c for c in cols if norms[c] == prefer_flag), None)
-            if picked_flag is None:
-                picked_flag = next((c for c in cols if all(tok in norms[c] for tok in ["retained","consult"])), None)
-            if picked_flag is None:
-                picked_flag = next((c for c in cols if "retained" in norms[c]), None)
-            if picked_flag is None and len(cols) > 5:
-                picked_flag = cols[5]  # Column F
-                
-            st.write("Picked columns → date:", picked_date, " initials:", picked_init, " flag:", picked_flag)
-            st.write("Date range filter:", start_date, "to", end_date)
 
-            if picked_date and picked_init and picked_flag:
-                t = df_ncl.copy()
-                in_range = _between_inclusive(t[picked_date], start_date, end_date)
-                kept = t[picked_flag].astype(str).str.strip().str.upper().ne("N")
-                st.write("Rows in date range:", in_range.sum())
-                st.write("Rows with retained flag != 'N':", kept.sum())
-                st.write("Rows meeting both criteria:", (in_range & kept).sum())
-                
-                sample = t.loc[in_range & kept, [picked_init, picked_flag, picked_date]].head(20)
-                st.write("First 20 rows in range & kept:", sample)
-                
-                # Show some sample data from the picked columns
-                st.write("Sample data from picked columns:")
-                sample_all = t[[picked_init, picked_flag, picked_date]].head(10)
-                st.write(sample_all)
-        else:
-            st.write("No NCL rows loaded for the current window.")
-
-    # Estate Planning inclusion audit
-    with st.expander("🔬 Estate Planning Inclusion Audit", expanded=False):
-        EP_NAMES = ["Connor Watkins", "Jennifer Fox", "Rebecca Megel"]
-
-        def _audit_sheet(df: pd.DataFrame, att_idx: int, date_idx: int, sub_idx: int, reason_idx: int, src: str) -> pd.DataFrame:
-            if not isinstance(df, pd.DataFrame) or df.empty or df.shape[1] <= max(att_idx, date_idx, sub_idx, reason_idx):
-                return pd.DataFrame(columns=["Attorney","Date","Source","Sub Status","Reason","InRange","IsFollowUp","HasCanceledMeeting","HasNoShow","Included"])
-            att, dtc, sub, rsn = df.columns[att_idx], df.columns[date_idx], df.columns[sub_idx], df.columns[reason_idx]
-            t = df[[att, dtc, sub, rsn]].copy()
-            t.columns = ["Attorney","Date","Sub Status","Reason"]
-            t["Attorney"] = t["Attorney"].astype(str).str.strip()
-            t = t[t["Attorney"].isin(EP_NAMES)].copy()
-
-            # parse using the same helpers as main logic
-            dt = _to_ts(t["Date"])
-            t["Date"] = dt
-            t["Source"] = src
-            t["InRange"] = (dt.dt.date >= start_date) & (dt.dt.date <= end_date)
-            t["IsFollowUp"] = t["Sub Status"].astype(str).str.strip().str.lower().eq("follow up")
-            # Check for "Canceled Meeting" or "No Show" in reason
-            reason_str = t["Reason"].astype(str).str.strip().str.lower()
-            t["HasCanceledMeeting"] = reason_str.str.contains("canceled meeting", na=False)
-            t["HasNoShow"] = reason_str.str.contains("no show", na=False)
-            t["Included"] = t["InRange"] & ~t["IsFollowUp"] & ~t["HasCanceledMeeting"] & ~t["HasNoShow"]
-            return t
-
-        ic_audit = _audit_sheet(df_init, 11, 12, 6, 8, "IC") if isinstance(df_init, pd.DataFrame) else pd.DataFrame()
-        dm_audit = _audit_sheet(df_disc, 11, 15, 6, 8, "DM") if isinstance(df_disc, pd.DataFrame) else pd.DataFrame()
-        ep_audit = pd.concat([ic_audit, dm_audit], ignore_index=True) if not ic_audit.empty or not dm_audit.empty else pd.DataFrame()
-
-        if ep_audit.empty:
-            st.info("No Estate Planning rows found in the current window.")
-        else:
-            summary = ep_audit.groupby(["Attorney","Source"], dropna=False).agg(
-                total=("Included", "size"),
-                in_range=("InRange","sum"),
-                excluded_followup=("IsFollowUp","sum"),
-                excluded_canceled=("HasCanceledMeeting","sum"),
-                excluded_noshow=("HasNoShow","sum"),
-                included=("Included","sum"),
-            ).reset_index()
-            st.write("Estate Planning — summary by attorney & source:", summary)
-            st.write("**EP totals — Included = met (IC+DM):**", int(ep_audit["Included"].sum()))
-            show_cols = ["Attorney","Date","Source","Sub Status","Reason","InRange","IsFollowUp","HasCanceledMeeting","HasNoShow","Included"]
-            st.dataframe(ep_audit[show_cols].sort_values(["Date","Attorney"]).reset_index(drop=True),
-                         use_container_width=True)
-
-    # General debug details
-    with st.expander("📈 General Debug Details", expanded=False):
-        if not df_leads.empty and "Stage" in df_leads.columns and len(leads_in_range) == len(df_leads):
-            st.write("Leads_PNCs — Stage (in selected period)",
-                     df_leads.loc[leads_in_range, "Stage"].value_counts(dropna=False))
-        if not init_in.empty:
-            st.write("Initial_Consultation — in range", init_in.shape)
-        if not disc_in.empty:
-            st.write("Discovery_Meeting — in range", disc_in.shape)
-        if ncl_flag_col:
-            st.write("New Client List — Retained split (in range)", ncl_in[ncl_flag_col].value_counts(dropna=False))
-        st.write(
-            f"Computed: Leads={row1}, PNCs={row2}, "
-            f"Retained w/out consult={row3}, Scheduled={row4} ({row5}%), "
-            f"Showed={row6} ({row7}%), Retained after consult={row8} ({row9}%), "
-            f"Total retained={row10} ({row11}%)"
-        )
-
-    # Technical logs
-    with st.expander("ℹ️ Technical Logs", expanded=False):
-        if st.session_state["logs"]:
-            for line in st.session_state["logs"]:
-                st.code(line)
-        else:
-            st.caption("No technical logs this session.")
