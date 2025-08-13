@@ -1966,22 +1966,60 @@ except Exception:
     st.info("Charts unavailable (install `plotly>=5.22` in requirements.txt).")
 
 if plotly_ok:
-    # For now, we'll create placeholder data since you only have one week of data
-    # This will show the structure and work when you add more data
+    # Generate appropriate data based on selected period
+    if viz_period_mode == "Year to date":
+        # Full year data
+        x_labels = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"]
+        retention_rates = [15, 16, 18, 17, 19, 20, 22, 21, 23, 24, 25, 26]
+        scheduled_rates = [85, 87, 89, 91, 93, 95, 88, 90, 92, 94, 96, 97]
+        show_up_rates = [92, 91, 93, 94, 95, 96, 88, 89, 90, 91, 92, 93]
+        x_label = "Month"
+        
+    elif viz_period_mode == "Month to date":
+        # Weekly data for selected month
+        month_name = months_map_names[viz_month]
+        weeks_in_month = 5  # Assume 5 weeks for placeholder
+        x_labels = [f"Week {i}" for i in range(1, weeks_in_month + 1)]
+        retention_rates = [18, 19, 20, 21, 22]  # Sample weekly data
+        scheduled_rates = [88, 90, 92, 94, 96]  # Sample weekly data
+        show_up_rates = [91, 92, 93, 94, 95]  # Sample weekly data
+        x_label = f"Week ({month_name} {viz_year})"
+        
+    elif viz_period_mode == "Quarterly":
+        # Monthly data for selected quarter
+        quarter_months = {"Q1": ["January", "February", "March"], 
+                         "Q2": ["April", "May", "June"], 
+                         "Q3": ["July", "August", "September"], 
+                         "Q4": ["October", "November", "December"]}
+        x_labels = quarter_months[viz_quarter]
+        # Sample quarterly data
+        if viz_quarter == "Q1":
+            retention_rates = [15, 16, 18]
+            scheduled_rates = [85, 87, 89]
+            show_up_rates = [92, 91, 93]
+        elif viz_quarter == "Q2":
+            retention_rates = [17, 19, 20]
+            scheduled_rates = [91, 93, 95]
+            show_up_rates = [94, 95, 96]
+        elif viz_quarter == "Q3":
+            retention_rates = [22, 21, 23]
+            scheduled_rates = [88, 90, 92]
+            show_up_rates = [88, 89, 90]
+        else:  # Q4
+            retention_rates = [24, 25, 26]
+            scheduled_rates = [94, 96, 97]
+            show_up_rates = [91, 92, 93]
+        x_label = "Month"
     
     # 1. Retained after meeting attorney trends (%)
     with st.expander("📈 Retained after meeting attorney trends (%)", expanded=False):
         st.info("This chart will show retention rates over time. Currently limited by available data (one week).")
         
-        # Placeholder data - replace with actual calculation when you have more data
-        months = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"]
-        retention_rates = [15, 16, 18, 17, 19, 20, 22, 21, 23, 24, 25, 26]  # Placeholder percentages
-        
         fig1 = px.line(
-            x=months, 
+            x=x_labels, 
             y=retention_rates,
             title=f"Retention Rate After Meeting (%) - {viz_practice_area}",
-            labels={"x": "Month", "y": "Retention Rate (%)"},
+            labels={"x": x_label, "y": "Retention Rate (%)"},
             markers=True
         )
         fig1.update_layout(yaxis_range=[0, 25])
@@ -1996,14 +2034,11 @@ if plotly_ok:
     with st.expander("📈 PNCs scheduled consults (%) trend", expanded=False):
         st.info("This chart will show consultation scheduling rates over time. Currently limited by available data (one week).")
         
-        # Placeholder data - replace with actual calculation when you have more data
-        scheduled_rates = [85, 87, 89, 91, 93, 95, 88, 90, 92, 94, 96, 97]  # Placeholder percentages
-        
         fig2 = px.line(
-            x=months, 
+            x=x_labels, 
             y=scheduled_rates,
             title=f"PNCs Scheduled Consultation (%) - {viz_practice_area}",
-            labels={"x": "Month", "y": "Scheduled Rate (%)"},
+            labels={"x": x_label, "y": "Scheduled Rate (%)"},
             markers=True
         )
         fig2.update_layout(yaxis_range=[80, 100])
@@ -2018,14 +2053,11 @@ if plotly_ok:
     with st.expander("📈 PNCs showed up trend (%)", expanded=False):
         st.info("This chart will show consultation attendance rates over time. Currently limited by available data (one week).")
         
-        # Placeholder data - replace with actual calculation when you have more data
-        show_up_rates = [92, 91, 93, 94, 95, 96, 88, 89, 90, 91, 92, 93]  # Placeholder percentages
-        
         fig3 = px.line(
-            x=months, 
+            x=x_labels, 
             y=show_up_rates,
             title=f"PNCs Showed Up for Consultation (%) - {viz_practice_area}",
-            labels={"x": "Month", "y": "Show Up Rate (%)"},
+            labels={"x": x_label, "y": "Show Up Rate (%)"},
             markers=True
         )
         fig3.update_layout(yaxis_range=[85, 100])
