@@ -2119,16 +2119,16 @@ if selected_intake == "ALL":
     
     # Create summary table with summed metrics
     all_summary_rows = [
-        ("PNCs did intake", total_pncs_intake),
-        ("% of total PNCs received", f"{all_pct_total:.1f}%"),
-        ("PNCs who retained without consultation", total_retained_without),
-        ("PNCs who scheduled consultation", total_scheduled),
+        ("Total PNCs all intake specialists did intake", total_pncs_intake),
+        ("% of total PNCs received all intake specialists did intake", f"{all_pct_total:.1f}%"),
+        ("Total PNCs who retained without consultation", total_retained_without),
+        ("Total PNCs who scheduled consultation", total_scheduled),
         ("% of remaining PNCs who scheduled consult", f"{all_pct_remaining_scheduled:.1f}%"),
-        ("PNCs who showed up for consultation", total_showed_up),
+        ("Total PNCs who showed up for consultation", total_showed_up),
         ("% of PNCs who showed up for consultation", f"{all_pct_showed_up:.1f}%"),
-        ("PNCs retained after scheduled consultation", total_retained_after),
+        ("Total PNCs retained after scheduled consultation", total_retained_after),
         ("% of PNCs who retained after scheduled consult", f"{all_pct_retained_after:.1f}%"),
-        ("Total PNCs who retained", total_retained),
+        ("All intake specialists' total PNCs who retained", total_retained),
         ("% of total PNCs received who retained", f"{all_pct_total_retained:.1f}%"),
     ]
     
@@ -2141,19 +2141,19 @@ else:
     
     data = intake_results[selected_intake]
     
-    # Create row-based table like practice area section
+    # Create row-based table like practice area section with personalized labels
     intake_rows = [
-        ("PNCs did intake", data["PNCs did intake"]),
-        ("% of total PNCs received", f"{data['% of total PNCs']:.1f}%"),
-        ("PNCs who retained without consultation", data["Retained without consult"]),
-        ("PNCs who scheduled consultation", data["Scheduled consult"]),
-        ("% of remaining PNCs who scheduled consult", f"{data['% remaining scheduled']:.1f}%"),
-        ("PNCs who showed up for consultation", data["Showed up"]),
-        ("% of PNCs who showed up for consultation", f"{data['% showed up']:.1f}%"),
-        ("PNCs retained after scheduled consultation", data["Retained after consult"]),
-        ("% of PNCs who retained after scheduled consult", f"{data['% retained after consult']:.1f}%"),
-        ("Total PNCs who retained", data["Total retained"]),
-        ("% of total PNCs received who retained", f"{data['% total retained']:.1f}%"),
+        (f"PNCs {selected_intake} did intake", data["PNCs did intake"]),
+        (f"% of total PNCs received {selected_intake} did intake", f"{data['% of total PNCs']:.1f}%"),
+        (f"PNCs who retained without consultation", data["Retained without consult"]),
+        (f"PNCs who scheduled consultation", data["Scheduled consult"]),
+        (f"% of remaining PNCs who scheduled consult", f"{data['% remaining scheduled']:.1f}%"),
+        (f"PNCs who showed up for consultation", data["Showed up"]),
+        (f"% of PNCs who showed up for consultation", f"{data['% showed up']:.1f}%"),
+        (f"PNCs retained after scheduled consultation", data["Retained after consult"]),
+        (f"% of PNCs who retained after scheduled consult", f"{data['% retained after consult']:.1f}%"),
+        (f"{selected_intake}'s total PNCs who retained", data["Total retained"]),
+        (f"% of total PNCs received who retained", f"{data['% total retained']:.1f}%"),
     ]
     
     # Create DataFrame for display
