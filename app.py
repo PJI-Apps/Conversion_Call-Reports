@@ -1974,8 +1974,8 @@ if plotly_ok:
         st.info("This chart will show retention rates over time. Currently limited by available data (one week).")
         
         # Placeholder data - replace with actual calculation when you have more data
-        months = ["July", "August", "September", "October", "November", "December"]
-        retention_rates = [15, 16, 18, 17, 19, 20]  # Placeholder percentages
+        months = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"]
+        retention_rates = [15, 16, 18, 17, 19, 20, 22, 21, 23, 24, 25, 26]  # Placeholder percentages
         
         fig1 = px.line(
             x=months, 
@@ -1987,14 +1987,17 @@ if plotly_ok:
         fig1.update_layout(yaxis_range=[0, 25])
         st.plotly_chart(fig1, use_container_width=True)
         
-        st.caption(f"Data source: Main conversion report - % of PNCs who retained after scheduled consult | Practice Area: {viz_practice_area}")
+        if viz_practice_area == "ALL":
+            st.caption(f"Data source: Main conversion report - % of PNCs who retained after scheduled consult | Practice Area: {viz_practice_area}")
+        else:
+            st.caption(f"Data source: Practice area section - % of PNCs who met with attorneys and retained | Practice Area: {viz_practice_area}")
     
     # 2. PNCs scheduled consults (%) trend
     with st.expander("📈 PNCs scheduled consults (%) trend", expanded=False):
         st.info("This chart will show consultation scheduling rates over time. Currently limited by available data (one week).")
         
         # Placeholder data - replace with actual calculation when you have more data
-        scheduled_rates = [85, 95, 88, 92, 90, 94]  # Placeholder percentages
+        scheduled_rates = [85, 87, 89, 91, 93, 95, 88, 90, 92, 94, 96, 97]  # Placeholder percentages
         
         fig2 = px.line(
             x=months, 
@@ -2006,14 +2009,17 @@ if plotly_ok:
         fig2.update_layout(yaxis_range=[80, 100])
         st.plotly_chart(fig2, use_container_width=True)
         
-        st.caption(f"Data source: Intake section (ALL) - % of remaining PNCs who scheduled consult | Practice Area: {viz_practice_area}")
+        if viz_practice_area == "ALL":
+            st.caption(f"Data source: Intake section (ALL) - % of remaining PNCs who scheduled consult | Practice Area: {viz_practice_area}")
+        else:
+            st.caption(f"Data source: Intake section filtered by practice area - % of remaining PNCs who scheduled consult | Practice Area: {viz_practice_area}")
     
     # 3. PNCs showed up trend (%)
     with st.expander("📈 PNCs showed up trend (%)", expanded=False):
         st.info("This chart will show consultation attendance rates over time. Currently limited by available data (one week).")
         
         # Placeholder data - replace with actual calculation when you have more data
-        show_up_rates = [92, 88, 95, 90, 93, 89]  # Placeholder percentages
+        show_up_rates = [92, 91, 93, 94, 95, 96, 88, 89, 90, 91, 92, 93]  # Placeholder percentages
         
         fig3 = px.line(
             x=months, 
@@ -2025,7 +2031,10 @@ if plotly_ok:
         fig3.update_layout(yaxis_range=[85, 100])
         st.plotly_chart(fig3, use_container_width=True)
         
-        st.caption(f"Data source: Intake section (ALL) - % of PNCs who showed up for consultation | Practice Area: {viz_practice_area}")
+        if viz_practice_area == "ALL":
+            st.caption(f"Data source: Intake section (ALL) - % of PNCs who showed up for consultation | Practice Area: {viz_practice_area}")
+        else:
+            st.caption(f"Data source: Intake section filtered by practice area - % of PNCs who showed up for consultation | Practice Area: {viz_practice_area}")
 
 # ───────────────────────────────────────────────────────────────────────────────
 # 🔧 Debugging & Troubleshooting
