@@ -120,84 +120,68 @@ def _gsheet_client():
     try:
         return _gsheet_client_cached()
     except Exception as e:
-        st.warning(f"Master store unavailable: {e}")
+        st.error(f"Google Sheets connection failed: {e}")
         return None, None
 
 GC, GSHEET = _gsheet_client()
 
 def _ws(title: str):
-    """Idempotent, race-safe worksheet getter/creator.
-
-    Guarantees:
-      • If a worksheet with `title` already exists, returns it without error.
-      • If it does not exist, creates it once and returns it.
-      • Uses fallbacks in TAB_FALLBACKS when present.
-    """
+    """Simplified worksheet getter/creator with better error handling."""
     if GSHEET is None:
+        st.error("Google Sheets not connected. Check your configuration.")
         return None
 
     import time
     from gspread.exceptions import APIError, WorksheetNotFound
 
-    # 1) Fast path: try fetching a few times (transient errors happen)
-    for delay in (0.0, 0.6, 1.2):
+    # First, try to get existing worksheet
+    for attempt in range(3):
         try:
-            if delay:
-                time.sleep(delay)
             return GSHEET.worksheet(title)
         except WorksheetNotFound:
-            # Double-check via full listing to avoid stale lookup cache
-            try:
-                existing_titles = {ws.title for ws in GSHEET.worksheets()}
-                if title in existing_titles:
-                    return GSHEET.worksheet(title)
-            except Exception:
-                pass
-            break  # not found after double-check; move on to fallbacks/create
-        except APIError:
-            # e.g., rate limit/5xx; retry
-            continue
-        except Exception:
-            continue
+            break  # Worksheet doesn't exist, we'll create it
+        except APIError as e:
+            if "rate limit" in str(e).lower() or "quota" in str(e).lower():
+                if attempt < 2:
+                    time.sleep(2 ** attempt)  # Exponential backoff
+                    continue
+            st.error(f"Google Sheets API error: {e}")
+            return None
+        except Exception as e:
+            st.error(f"Unexpected error accessing worksheet '{title}': {e}")
+            return None
 
-    # 2) Fallback titles (legacy tab names)
+    # Try fallback names
     for fb in TAB_FALLBACKS.get(title, []):
         try:
             return GSHEET.worksheet(fb)
         except Exception:
             continue
 
-    # 3) Create only if truly absent; treat ALREADY_EXISTS as success
+    # Create new worksheet
     try:
-        GSHEET.add_worksheet(title=title, rows=2000, cols=40)
-        return GSHEET.worksheet(title)
+        new_ws = GSHEET.add_worksheet(title=title, rows=2000, cols=40)
+        st.success(f"Created new worksheet: {title}")
+        return new_ws
     except APIError as e:
-        # If another writer created it milliseconds before us, Google returns ALREADY_EXISTS.
         if "already exists" in str(e).lower():
+            # Another process created it, try to get it
             try:
                 return GSHEET.worksheet(title)
             except Exception:
                 pass
-        # Some APIErrors are retryable; try one last fetch before failing silently
-        try:
-            return GSHEET.worksheet(title)
-        except Exception:
-            pass
-    except Exception:
-        try:
-            return GSHEET.worksheet(title)
-        except Exception:
-            pass
-
-    st.error(f"Could not access/create worksheet '{title}'. Please check permissions and tab names.")
-    return None
+        st.error(f"Failed to create worksheet '{title}': {e}")
+        return None
+    except Exception as e:
+        st.error(f"Unexpected error creating worksheet '{title}': {e}")
+        return None
 
 
 def _clean_datestr(x):
     if pd.isna(x): return x
     s = str(x).strip()
     s = re.sub(r"\s+at\s+", " ", s, flags=re.I)
-    s = re.sub(r"\s+(ET|EDT|EST|CT|CDT|CST|MT|MDT|MST|PT|PDT)$", "", s)
+    s = re.sub(r"\s+(ET|EDT|EST|CT|CDT|CST|MT|MDT|MST|PT|PDT)\b", "", s)
     return s
 
 @st.cache_data(ttl=300, show_spinner=False)
@@ -385,6 +369,24 @@ def render_admin_sidebar():
                     if key == "CALLS": st.session_state.get("hashes_calls", set()).clear()
                     else:              st.session_state.get("hashes_conv", set()).clear()
                     st.session_state["gs_ver"] += 1; st.rerun()
+
+
+
+        # Data inspection section
+        with st.container(border=True):
+            st.markdown("**Data Inspection**")
+            st.caption("View sample data and column information.")
+            
+            df_sample = _read_ws_by_name(key)
+            if not df_sample.empty:
+                st.write(f"**Columns in {sel_label}:**")
+                for i, col in enumerate(df_sample.columns, 1):
+                    st.write(f"{i}. {col}")
+                
+                if st.button("Show sample data", use_container_width=True):
+                    st.dataframe(df_sample.head(10), use_container_width=True)
+            else:
+                st.info(f"No data in {sel_label}")
 
 # Render it now
 render_admin_sidebar()
@@ -597,14 +599,14 @@ if "hashes_calls" not in st.session_state: st.session_state["hashes_calls"] = se
 if "hashes_conv"  not in st.session_state: st.session_state["hashes_conv"]  = set()
 
 with st.expander("🧾 Data Upload (Calls & Conversion)", expanded=st.session_state.get("exp_upload_open", False)):
+    # Allow re-upload of the same files this session
     if st.button("Allow re-upload of the same files this session"):
         st.session_state.get("hashes_calls", set()).clear()
         st.session_state.get("hashes_conv", set()).clear()
-        st.caption("Ready — you can re-upload the same files now.")
+        st.success("Re-upload enabled for this session.")
+        st.rerun()
 
     calls_period_key, calls_uploader = upload_section("zoom_calls", "Zoom Calls", "exp_upload_open")
-    force_replace_calls = st.checkbox("Replace this month in Calls if it already exists",
-                                      key="force_calls_replace")
 
     c1, c2 = st.columns(2)
     upload_start = c1.date_input("Conversion upload start date",
@@ -617,22 +619,24 @@ with st.expander("🧾 Data Upload (Calls & Conversion)", expanded=st.session_st
                                  on_change=_keep_open_flag, args=("exp_upload_open",))
     if upload_start > upload_end: st.error("Upload start must be on or before end.")
 
+    # Conversion file uploads with clearer options
+    st.markdown("**Conversion Files:**")
+    
     up_leads = st.file_uploader("Upload **Leads_PNCs**", type=["csv","xls","xlsx"],
                                 key="up_leads_pncs", on_change=_keep_open_flag, args=("exp_upload_open",))
-    replace_leads = st.checkbox("Replace matching records in Leads (Email+Matter ID+Stage+IC Date+DM Date)",
-                                key="rep_leads")
+    replace_leads = st.checkbox("Replace existing data for this date range", key="rep_leads")
 
     up_init  = st.file_uploader("Upload **Initial_Consultation**", type=["csv","xls","xlsx"],
                                 key="up_initial", on_change=_keep_open_flag, args=("exp_upload_open",))
-    replace_init = st.checkbox("Replace this date range in Initial_Consultation", key="rep_init")
+    replace_init = st.checkbox("Replace existing data for this date range", key="rep_init")
 
     up_disc  = st.file_uploader("Upload **Discovery_Meeting**", type=["csv","xls","xlsx"],
                                 key="up_discovery", on_change=_keep_open_flag, args=("exp_upload_open",))
-    replace_disc = st.checkbox("Replace this date range in Discovery_Meeting", key="rep_disc")
+    replace_disc = st.checkbox("Replace existing data for this date range", key="rep_disc")
 
     up_ncl   = st.file_uploader("Upload **New Client List**", type=["csv","xls","xlsx"],
                                 key="up_ncl", on_change=_keep_open_flag, args=("exp_upload_open",))
-    replace_ncl = st.checkbox("Replace this date range in New Client List", key="rep_ncl")
+    replace_ncl = st.checkbox("Replace existing data for this date range", key="rep_ncl")
 
     def _read_any(upload):
         if upload is None: return None
@@ -656,45 +660,40 @@ with st.expander("🧾 Data Upload (Calls & Conversion)", expanded=st.session_st
 
     # Calls processing
     if calls_uploader:
-        CALLS_MASTER_COLS = [
-            "Category","Name","Total Calls","Completed Calls","Outgoing","Received",
-            "Forwarded to Voicemail","Answered by Other","Missed",
-            "Avg Call Time","Total Call Time","Total Hold Time","Month-Year"
-        ]
         try:
             fhash = file_md5(calls_uploader)
-            month_exists = False
-            try:
-                existing = _read_ws_by_name("CALLS")
-                if isinstance(existing, pd.DataFrame) and not existing.empty:
-                    month_exists = existing["Month-Year"].astype(str).eq(calls_period_key).any()
-            except Exception as e:
-                log(f"Month existence check failed: {e}")
-
-            if fhash in st.session_state["hashes_calls"] and month_exists and not force_replace_calls:
-                st.caption("Calls: same file and month already present — upload skipped.")
+            if fhash in st.session_state["hashes_calls"]:
+                st.caption("Calls: same file already present — upload skipped.")
                 log("Calls upload skipped by session dedupe guard.")
             else:
                 raw = pd.read_csv(calls_uploader)
                 processed = process_calls_csv(raw, calls_period_key)
-                processed_clean = processed[CALLS_MASTER_COLS].copy()
+                processed_clean = processed[["Category","Name","Total Calls","Completed Calls","Outgoing","Received",
+                                           "Forwarded to Voicemail","Answered by Other","Missed",
+                                           "Avg Call Time","Total Call Time","Total Hold Time","Month-Year"]].copy()
 
                 if GSHEET is None:
                     st.warning("Master store not configured; Calls will not persist.")
                     df_calls_master = processed_clean.copy()
                 else:
                     current = _read_ws_by_name("CALLS")
-                    if force_replace_calls and month_exists and not current.empty:
-                        current = current.loc[current["Month-Year"].astype(str).str.strip() != calls_period_key].copy()
                     combined = (pd.concat([current, processed_clean], ignore_index=True)
                                 if not current.empty else processed_clean.copy())
+                    
+                    # Dedupe by month+name+category
                     key = (combined["Month-Year"].astype(str).str.strip() + "|" +
                            combined["Name"].astype(str).str.strip() + "|" +
                            combined["Category"].astype(str).str.strip())
                     combined = combined.loc[~key.duplicated(keep="last")].copy()
-                    _write_ws_by_name("CALLS", combined)
-                    st.success(f"Calls: upserted {len(processed_clean)} row(s).")
+                    
+                    success = _write_ws_by_name("CALLS", combined)
+                    if success:
+                        st.success(f"Calls: upserted {len(processed_clean)} row(s) for {calls_period_key}")
+                    else:
+                        st.error("Failed to save Calls data to Google Sheets")
+                    
                     df_calls_master = combined.copy()
+                
                 st.session_state["hashes_calls"].add(fhash)
         except Exception as e:
             st.error("Could not parse Calls CSV."); st.exception(e)
@@ -713,8 +712,11 @@ with st.expander("🧾 Data Upload (Calls & Conversion)", expanded=st.session_st
         if not upl: continue
         try:
             fhash = file_md5(upl)
+            
+            # Check if this exact file was already processed this session
             if fhash in st.session_state["hashes_conv"]:
                 st.caption(f"{key_name}: duplicate file — ignored.")
+                st.info("💡 Use 'Clear session cache' button above to re-upload the same file.")
                 log(f"{key_name} skipped by session dedupe guard.")
                 continue
 
@@ -722,54 +724,10 @@ with st.expander("🧾 Data Upload (Calls & Conversion)", expanded=st.session_st
             if df_up is None or df_up.empty:
                 st.caption(f"{key_name}: file appears empty."); continue
 
-            if key_name == "LEADS":
-                df_up["__batch_start"] = pd.to_datetime(upload_start)
-                df_up["__batch_end"]   = pd.to_datetime(upload_end)
-
-            if key_name == "NCL" and "Retained with Consult (Y/N)" in df_up.columns \
-               and "Retained With Consult (Y/N)" not in df_up.columns:
-                df_up = df_up.rename(columns={"Retained with Consult (Y/N)":"Retained With Consult (Y/N)"})
-
             current = _read_ws_by_name(key_name)
-
-            if want_replace and not current.empty:
-                if key_name == "LEADS":
-                    key_in = (
-                        df_up.get("Email","").astype(str).str.strip() + "|" +
-                        df_up.get("Matter ID","").astype(str).str.strip() + "|" +
-                        df_up.get("Stage","").astype(str).str.strip() + "|" +
-                        df_up.get("Initial Consultation With Pji Law","").astype(str) + "|" +
-                        df_up.get("Discovery Meeting With Pji Law","").astype(str)
-                    )
-                    incoming_keys = set(key_in.tolist())
-                    key_cur = (
-                        current.get("Email","").astype(str).str.strip() + "|" +
-                        current.get("Matter ID","").astype(str).str.strip() + "|" +
-                        current.get("Stage","").astype(str).str.strip() + "|" +
-                        current.get("Initial Consultation With Pji Law","").astype(str) + "|" +
-                        current.get("Discovery Meeting With Pji Law","").astype(str)
-                    )
-                    mask_keep = ~key_cur.isin(incoming_keys)
-                    current = current.loc[mask_keep].copy()
-                elif key_name == "INIT":
-                    col = "Initial Consultation With Pji Law"
-                    if col in current.columns:
-                        drop_mask = _mask_by_range(current, col)
-                        current = current.loc[~drop_mask].copy()
-                elif key_name == "DISC":
-                    col = "Discovery Meeting With Pji Law"
-                    if col in current.columns:
-                        drop_mask = _mask_by_range(current, col)
-                        current = current.loc[~drop_mask].copy()
-                elif key_name == "NCL":
-                    col = "Date we had BOTH the signed CLA and full payment"
-                    if col in current.columns:
-                        drop_mask = _mask_by_range(current, col)
-                        current = current.loc[~drop_mask].copy()
-
             combined = pd.concat([current, df_up], ignore_index=True) if not current.empty else df_up.copy()
 
-            # Dedupe by dataset keys
+            # Dedupe by dataset-specific keys
             if key_name == "LEADS":
                 k = (combined.get("Email","").astype(str).str.strip() + "|" +
                      combined.get("Matter ID","").astype(str).str.strip() + "|" +
@@ -792,12 +750,25 @@ with st.expander("🧾 Data Upload (Calls & Conversion)", expanded=st.session_st
                      combined.get("Date we had BOTH the signed CLA and full payment","").astype(str) + "|" +
                      combined.get("Retained With Consult (Y/N)","").astype(str).str.strip())
 
+            # Remove duplicates (keep the most recent)
+            before_dedup = len(combined)
             combined = combined.loc[~k.duplicated(keep="last")].copy()
-            _write_ws_by_name(key_name, combined)
-            st.success(f"{key_name}: upserted {len(df_up)} row(s).")
+            after_dedup = len(combined)
+            duplicates_removed = before_dedup - after_dedup
+            
+            # Save to Google Sheets
+            success = _write_ws_by_name(key_name, combined)
+            if success:
+                st.success(f"{key_name}: upserted {len(df_up)} row(s)")
+                if duplicates_removed > 0:
+                    st.info(f"Removed {duplicates_removed} duplicate records")
+            else:
+                st.error(f"Failed to save {key_name} data to Google Sheets")
+            
             st.session_state["hashes_conv"].add(fhash)
         except Exception as e:
-            st.error(f"{key_name}: upload failed."); st.exception(e)
+            st.error(f"{key_name}: upload failed.")
+            st.exception(e)
 
 # Load masters
 df_calls = _read_ws_by_name("CALLS") if GSHEET is not None else pd.DataFrame()
@@ -1503,254 +1474,366 @@ for pa in ["Estate Planning","Estate Administration","Civil Litigation","Busines
                 float(rowx["% of PNCs who met and retained"]),
             )
 
-# --- Concise debug snapshots ---
-with st.expander("🔧 IC/DM sanity (per sheet & PA) — current window", expanded=False):
-    ic_L = _col_by_idx(df_init, 11); ic_M = _col_by_idx(df_init, 12)
-    dm_L = _col_by_idx(df_disc, 11); dm_P = _col_by_idx(df_disc, 15)
-    st.write("IC Lead (L):", ic_L, "IC Date (M):", ic_M)
-    st.write("DM Lead (L):", dm_L, "DM Date (P):", dm_P)
-    st.write("Date range filter:", start_date, "to", end_date)
-    st.write("Raw met counts from function:", met_counts_raw)
-    st.write("Per-attorney MET (IC+DM index-based):", met_by_attorney, "TOTAL =", sum(met_by_attorney.values()))
-    for pa in ["Estate Planning","Estate Administration","Civil Litigation","Business transactional","Other"]:
-        names = [n for n in CANON if _practice_for(n) == pa]
-        pa_total = sum(met_by_attorney.get(n, 0) for n in names)
-        st.write(pa, "met =", pa_total, "by", {n: met_by_attorney.get(n, 0) for n in names})
-        
-        # Show breakdown by source (IC vs DM) for Estate Planning
-        if pa == "Estate Planning":
-            st.write("--- Estate Planning breakdown ---")
-            ep_names = ["Connor Watkins", "Jennifer Fox", "Rebecca Megel"]
-            
-            # Check IC data
-            if isinstance(df_init, pd.DataFrame) and df_init.shape[1] >= 13:
-                ic_att, ic_dtc, ic_sub, ic_rsn = df_init.columns[11], df_init.columns[12], df_init.columns[6], df_init.columns[8]
-                ic_t = df_init.copy()
-                ic_m = _between_inclusive(ic_t[ic_dtc], start_date, end_date)
-                ic_m &= ~ic_t[ic_sub].astype(str).str.strip().str.lower().eq("follow up")
-                ic_m &= _is_blank(ic_t[ic_rsn])
-                ic_ep = ic_t.loc[ic_m & ic_t[ic_att].astype(str).str.strip().isin(ep_names)]
-                st.write("IC - EP attorneys in range:", ic_ep[ic_att].value_counts().to_dict())
-            
-            # Check DM data
-            if isinstance(df_disc, pd.DataFrame) and df_disc.shape[1] >= 16:
-                dm_att, dm_dtc, dm_sub, dm_rsn = df_disc.columns[11], df_disc.columns[15], df_disc.columns[6], df_disc.columns[8]
-                dm_t = df_disc.copy()
-                dm_m = _between_inclusive(dm_t[dm_dtc], start_date, end_date)
-                dm_m &= ~dm_t[dm_sub].astype(str).str.strip().str.lower().eq("follow up")
-                dm_m &= _is_blank(dm_t[dm_rsn])
-                dm_ep = dm_t.loc[dm_m & dm_t[dm_att].astype(str).str.strip().isin(ep_names)]
-                st.write("DM - EP attorneys in range:", dm_ep[dm_att].value_counts().to_dict())
+# ───────────────────────────────────────────────────────────────────────────────
+# 📊 Conversion Data Visualizations
+# ───────────────────────────────────────────────────────────────────────────────
+st.markdown("---")
+st.header("📊 Conversion Data Visualizations")
 
-with st.expander("🔧 NCL retained sanity — headers & sample", expanded=False):
-    if isinstance(df_ncl, pd.DataFrame) and not df_ncl.empty:
-        st.write("NCL columns (index → name):", {i: c for i, c in enumerate(df_ncl.columns)})
-        # Show which headers were picked and the first 20 included rows
-        def _norm(s): 
-            s = str(s).lower().strip(); 
-            s = _re.sub(r"[\s_]+", " ", s); 
-            s = _re.sub(r"[^a-z0-9 ]", "", s); 
-            return s
-        cols = list(df_ncl.columns); norms = {c: _norm(c) for c in cols}
+# Check if plotly is available
+try:
+    import plotly.express as px
+    import plotly.graph_objects as go
+    from plotly.subplots import make_subplots
+    plotly_ok = True
+except Exception:
+    plotly_ok = False
+    st.info("Charts unavailable (install `plotly>=5.22` in requirements.txt).")
+
+if plotly_ok:
+    # Create tabs for different visualization types
+    viz_tab1, viz_tab2, viz_tab3 = st.tabs(["📈 Monthly Trends", "👥 Practice Area Performance", "📊 Attorney Performance"])
+    
+    with viz_tab1:
+        st.subheader("Monthly Trends")
         
-        # Show what columns were found with each approach
-        prefer_date = _norm("Date we had BOTH the signed CLA and full payment")
-        picked_date = next((c for c in cols if norms[c] == prefer_date), None)
-        if picked_date is None:
-            cands = [c for c in cols if all(tok in norms[c] for tok in ["date","signed","payment"])]
-            if cands:
-                cands.sort(key=lambda c: len(norms[c])); picked_date = cands[0]
-        if picked_date is None:
-            picked_date = next((c for c in cols if "date" in norms[c]), None)
-        if picked_date is None and len(cols) > 6:
-            picked_date = cols[6]  # Column G
+        # Time period selector
+        col1, col2 = st.columns(2)
+        with col1:
+            trend_period = st.selectbox(
+                "View Period",
+                ["Year to Date", "Month to Date", "Last 12 Months"],
+                key="trend_period"
+            )
+        with col2:
+            trend_metric = st.selectbox(
+                "Primary Metric",
+                ["Retained After Meeting", "PNCs Showed Up", "Conversion Rate"],
+                key="trend_metric"
+            )
+        
+        # Calculate date range for trends
+        today = date.today()
+        if trend_period == "Year to Date":
+            trend_start = date(today.year, 1, 1)
+            trend_end = today
+        elif trend_period == "Month to Date":
+            trend_start = date(today.year, today.month, 1)
+            trend_end = today
+        else:  # Last 12 Months
+            trend_start = date(today.year - 1, today.month, today.day)
+            trend_end = today
+        
+        # Prepare monthly data for trends
+        monthly_data = []
+        
+        # Generate monthly buckets
+        current_date = trend_start.replace(day=1)
+        while current_date <= trend_end:
+            month_end = (current_date.replace(day=28) + pd.Timedelta(days=4)).replace(day=1) - pd.Timedelta(days=1)
+            month_end = min(month_end, trend_end)
             
-        picked_init = next((c for c in cols if all(tok in norms[c] for tok in ["responsible","attorney"])), None)
-        if picked_init is None:
-            picked_init = next((c for c in cols if "attorney" in norms[c]), None)
-        if picked_init is None and len(cols) > 4:
-            picked_init = cols[4]  # Column E
+            # Calculate metrics for this month
+            month_start = current_date
+            month_end_date = month_end
             
-        prefer_flag = _norm("Retained With Consult (Y/N)")
-        picked_flag = next((c for c in cols if norms[c] == prefer_flag), None)
-        if picked_flag is None:
-            picked_flag = next((c for c in cols if all(tok in norms[c] for tok in ["retained","consult"])), None)
-        if picked_flag is None:
-            picked_flag = next((c for c in cols if "retained" in norms[c]), None)
-        if picked_flag is None and len(cols) > 5:
-            picked_flag = cols[5]  # Column F
+            # Get data for this month
+            month_init = df_init.loc[_between_inclusive(df_init.iloc[:, 12], month_start, month_end_date)] if not df_init.empty else pd.DataFrame()
+            month_disc = df_disc.loc[_between_inclusive(df_disc.iloc[:, 15], month_start, month_end_date)] if not df_disc.empty else pd.DataFrame()
+            month_ncl = df_ncl.loc[_between_inclusive(df_ncl.iloc[:, 6], month_start, month_end_date)] if not df_ncl.empty else pd.DataFrame()
             
-        st.write("Picked columns → date:", picked_date, " initials:", picked_init, " flag:", picked_flag)
+            # Calculate metrics
+            total_met = len(month_init) + len(month_disc)
+            total_retained = len(month_ncl) if not month_ncl.empty else 0
+            conversion_rate = (total_retained / total_met * 100) if total_met > 0 else 0
+            
+            monthly_data.append({
+                'Month': current_date.strftime('%Y-%m'),
+                'Month_Date': current_date,
+                'Total_Met': total_met,
+                'Total_Retained': total_retained,
+                'Conversion_Rate': conversion_rate
+            })
+            
+            # Move to next month
+            current_date = (current_date.replace(day=28) + pd.Timedelta(days=4)).replace(day=1)
+        
+        if monthly_data:
+            df_trends = pd.DataFrame(monthly_data)
+            
+            # Create trend chart
+            if trend_metric == "Retained After Meeting":
+                y_col = 'Total_Retained'
+                title = "Monthly Trend: Retained After Meeting"
+            elif trend_metric == "PNCs Showed Up":
+                y_col = 'Total_Met'
+                title = "Monthly Trend: PNCs Showed Up"
+            else:  # Conversion Rate
+                y_col = 'Conversion_Rate'
+                title = "Monthly Trend: Conversion Rate (%)"
+            
+            fig = px.line(df_trends, x='Month', y=y_col, 
+                         title=title,
+                         markers=True,
+                         labels={'Month': 'Month', y_col: trend_metric})
+            fig.update_layout(height=400)
+            st.plotly_chart(fig, use_container_width=True)
+            
+            # Show data table
+            st.subheader("Monthly Data")
+            display_df = df_trends.copy()
+            display_df['Month'] = display_df['Month_Date'].dt.strftime('%B %Y')
+            display_df = display_df[['Month', 'Total_Met', 'Total_Retained', 'Conversion_Rate']]
+            display_df.columns = ['Month', 'PNCs Showed Up', 'Retained After Meeting', 'Conversion Rate (%)']
+            st.dataframe(display_df, use_container_width=True)
+        else:
+            st.info("No data available for the selected time period.")
+    
+    with viz_tab2:
+        st.subheader("Practice Area Performance")
+        
+        # Practice area performance chart
+        practice_metrics = []
+        for pa in ["Estate Planning", "Estate Administration", "Civil Litigation", "Business transactional", "Other"]:
+            pa_sub = report.loc[report["Practice Area"] == pa].copy()
+            met_sum = int(pa_sub["PNCs who met"].sum())
+            kept_sum = int(pa_sub["PNCs who met and retained"].sum())
+            pct_sum = 0.0 if met_sum == 0 else round((kept_sum / met_sum) * 100.0, 2)
+            
+            practice_metrics.append({
+                'Practice Area': pa,
+                'PNCs Met': met_sum,
+                'Retained': kept_sum,
+                'Conversion Rate (%)': pct_sum
+            })
+        
+        if practice_metrics:
+            df_practice = pd.DataFrame(practice_metrics)
+            
+            # Bar chart for practice areas
+            fig = px.bar(df_practice, x='Practice Area', y='Conversion Rate (%)',
+                        title='Conversion Rate by Practice Area',
+                        color='Practice Area',
+                        text='Conversion Rate (%)')
+            fig.update_traces(texttemplate='%{text:.1f}%', textposition='outside')
+            fig.update_layout(height=400, showlegend=False)
+            st.plotly_chart(fig, use_container_width=True)
+            
+            # Show practice area data
+            st.dataframe(df_practice, use_container_width=True)
+    
+    with viz_tab3:
+        st.subheader("Attorney Performance")
+        
+        # Filter by practice area
+        pa_filter = st.selectbox(
+            "Filter by Practice Area",
+            ["All Practice Areas"] + ["Estate Planning", "Estate Administration", "Civil Litigation", "Business transactional", "Other"],
+            key="attorney_pa_filter"
+        )
+        
+        # Filter attorney data
+        if pa_filter == "All Practice Areas":
+            attorney_data = report.copy()
+        else:
+            attorney_data = report.loc[report["Practice Area"] == pa_filter].copy()
+        
+        if not attorney_data.empty:
+            # Create attorney performance chart
+            fig = px.scatter(attorney_data, 
+                           x='PNCs who met', 
+                           y='% of PNCs who met and retained',
+                           size='PNCs who met and retained',
+                           color='Practice Area',
+                           hover_name='Attorney_Display',
+                           title='Attorney Performance: Volume vs Conversion Rate',
+                           labels={'PNCs who met': 'PNCs Met', 
+                                  '% of PNCs who met and retained': 'Conversion Rate (%)',
+                                  'PNCs who met and retained': 'Retained'})
+            fig.update_layout(height=500)
+            st.plotly_chart(fig, use_container_width=True)
+            
+            # Show attorney data
+            st.dataframe(attorney_data[['Attorney_Display', 'Practice Area', 'PNCs who met', 
+                                       'PNCs who met and retained', '% of PNCs who met and retained']], 
+                        use_container_width=True)
+        else:
+            st.info("No attorney data available for the selected practice area.")
+
+# ───────────────────────────────────────────────────────────────────────────────
+# 🔧 Debugging Section
+# ───────────────────────────────────────────────────────────────────────────────
+with st.expander("🔧 Debugging & Troubleshooting", expanded=False):
+    st.caption("Technical details for troubleshooting and verification. Collapsed by default for cleaner UI.")
+    
+    # IC/DM sanity check
+    with st.expander("📊 IC/DM Sanity Check", expanded=False):
+        ic_L = _col_by_idx(df_init, 11); ic_M = _col_by_idx(df_init, 12)
+        dm_L = _col_by_idx(df_disc, 11); dm_P = _col_by_idx(df_disc, 15)
+        st.write("IC Lead (L):", ic_L, "IC Date (M):", ic_M)
+        st.write("DM Lead (L):", dm_L, "DM Date (P):", dm_P)
         st.write("Date range filter:", start_date, "to", end_date)
-
-        if picked_date and picked_init and picked_flag:
-            t = df_ncl.copy()
-            in_range = _between_inclusive(t[picked_date], start_date, end_date)
-            kept = t[picked_flag].astype(str).str.strip().str.upper().ne("N")
-            st.write("Rows in date range:", in_range.sum())
-            st.write("Rows with retained flag != 'N':", kept.sum())
-            st.write("Rows meeting both criteria:", (in_range & kept).sum())
+        st.write("Raw met counts from function:", met_counts_raw)
+        st.write("Per-attorney MET (IC+DM index-based):", met_by_attorney, "TOTAL =", sum(met_by_attorney.values()))
+        for pa in ["Estate Planning","Estate Administration","Civil Litigation","Business transactional","Other"]:
+            names = [n for n in CANON if _practice_for(n) == pa]
+            pa_total = sum(met_by_attorney.get(n, 0) for n in names)
+            st.write(pa, "met =", pa_total, "by", {n: met_by_attorney.get(n, 0) for n in names})
             
-            sample = t.loc[in_range & kept, [picked_init, picked_flag, picked_date]].head(20)
-            st.write("First 20 rows in range & kept:", sample)
+            # Show breakdown by source (IC vs DM) for Estate Planning
+            if pa == "Estate Planning":
+                st.write("--- Estate Planning breakdown ---")
+                ep_names = ["Connor Watkins", "Jennifer Fox", "Rebecca Megel"]
+                
+                # Check IC data
+                if isinstance(df_init, pd.DataFrame) and df_init.shape[1] >= 13:
+                    ic_att, ic_dtc, ic_sub, ic_rsn = df_init.columns[11], df_init.columns[12], df_init.columns[6], df_init.columns[8]
+                    ic_t = df_init.copy()
+                    ic_m = _between_inclusive(ic_t[ic_dtc], start_date, end_date)
+                    ic_m &= ~ic_t[ic_sub].astype(str).str.strip().str.lower().eq("follow up")
+                    ic_m &= _is_blank(ic_t[ic_rsn])
+                    ic_ep = ic_t.loc[ic_m & ic_t[ic_att].astype(str).str.strip().isin(ep_names)]
+                    st.write("IC - EP attorneys in range:", ic_ep[ic_att].value_counts().to_dict())
+                
+                # Check DM data
+                if isinstance(df_disc, pd.DataFrame) and df_disc.shape[1] >= 16:
+                    dm_att, dm_dtc, dm_sub, dm_rsn = df_disc.columns[11], df_disc.columns[15], df_disc.columns[6], df_disc.columns[8]
+                    dm_t = df_disc.copy()
+                    dm_m = _between_inclusive(dm_t[dm_dtc], start_date, end_date)
+                    dm_m &= ~dm_t[dm_sub].astype(str).str.strip().str.lower().eq("follow up")
+                    dm_m &= _is_blank(dm_t[dm_rsn])
+                    dm_ep = dm_t.loc[dm_m & dm_t[dm_att].astype(str).str.strip().isin(ep_names)]
+                    st.write("DM - EP attorneys in range:", dm_ep[dm_att].value_counts().to_dict())
+
+    # NCL retained sanity check
+    with st.expander("📋 NCL Retained Sanity Check", expanded=False):
+        if isinstance(df_ncl, pd.DataFrame) and not df_ncl.empty:
+            st.write("NCL columns (index → name):", {i: c for i, c in enumerate(df_ncl.columns)})
+            # Show which headers were picked and the first 20 included rows
+            def _norm(s): 
+                s = str(s).lower().strip(); 
+                s = _re.sub(r"[\s_]+", " ", s); 
+                s = _re.sub(r"[^a-z0-9 ]", "", s); 
+                return s
+            cols = list(df_ncl.columns); norms = {c: _norm(c) for c in cols}
             
-            # Show some sample data from the picked columns
-            st.write("Sample data from picked columns:")
-            sample_all = t[[picked_init, picked_flag, picked_date]].head(10)
-            st.write(sample_all)
-    else:
-        st.write("No NCL rows loaded for the current window.")
+            # Show what columns were found with each approach
+            prefer_date = _norm("Date we had BOTH the signed CLA and full payment")
+            picked_date = next((c for c in cols if norms[c] == prefer_date), None)
+            if picked_date is None:
+                cands = [c for c in cols if all(tok in norms[c] for tok in ["date","signed","payment"])]
+                if cands:
+                    cands.sort(key=lambda c: len(norms[c])); picked_date = cands[0]
+            if picked_date is None:
+                picked_date = next((c for c in cols if "date" in norms[c]), None)
+            if picked_date is None and len(cols) > 6:
+                picked_date = cols[6]  # Column G
+                
+            picked_init = next((c for c in cols if all(tok in norms[c] for tok in ["responsible","attorney"])), None)
+            if picked_init is None:
+                picked_init = next((c for c in cols if "attorney" in norms[c]), None)
+            if picked_init is None and len(cols) > 4:
+                picked_init = cols[4]  # Column E
+                
+            prefer_flag = _norm("Retained With Consult (Y/N)")
+            picked_flag = next((c for c in cols if norms[c] == prefer_flag), None)
+            if picked_flag is None:
+                picked_flag = next((c for c in cols if all(tok in norms[c] for tok in ["retained","consult"])), None)
+            if picked_flag is None:
+                picked_flag = next((c for c in cols if "retained" in norms[c]), None)
+            if picked_flag is None and len(cols) > 5:
+                picked_flag = cols[5]  # Column F
+                
+            st.write("Picked columns → date:", picked_date, " initials:", picked_init, " flag:", picked_flag)
+            st.write("Date range filter:", start_date, "to", end_date)
 
-# --- Estate Planning inclusion audit (row-level) ---
-with st.expander("🔬 Estate Planning — inclusion audit (IC: L/M/G/I, DM: L/P/G/I)", expanded=False):
-    EP_NAMES = ["Connor Watkins", "Jennifer Fox", "Rebecca Megel"]
+            if picked_date and picked_init and picked_flag:
+                t = df_ncl.copy()
+                in_range = _between_inclusive(t[picked_date], start_date, end_date)
+                kept = t[picked_flag].astype(str).str.strip().str.upper().ne("N")
+                st.write("Rows in date range:", in_range.sum())
+                st.write("Rows with retained flag != 'N':", kept.sum())
+                st.write("Rows meeting both criteria:", (in_range & kept).sum())
+                
+                sample = t.loc[in_range & kept, [picked_init, picked_flag, picked_date]].head(20)
+                st.write("First 20 rows in range & kept:", sample)
+                
+                # Show some sample data from the picked columns
+                st.write("Sample data from picked columns:")
+                sample_all = t[[picked_init, picked_flag, picked_date]].head(10)
+                st.write(sample_all)
+        else:
+            st.write("No NCL rows loaded for the current window.")
 
-    def _audit_sheet(df: pd.DataFrame, att_idx: int, date_idx: int, sub_idx: int, reason_idx: int, src: str) -> pd.DataFrame:
-        if not isinstance(df, pd.DataFrame) or df.empty or df.shape[1] <= max(att_idx, date_idx, sub_idx, reason_idx):
-            return pd.DataFrame(columns=["Attorney","Date","Source","Sub Status","Reason","InRange","IsFollowUp","HasCanceledMeeting","HasNoShow","Included"])
-        att, dtc, sub, rsn = df.columns[att_idx], df.columns[date_idx], df.columns[sub_idx], df.columns[reason_idx]
-        t = df[[att, dtc, sub, rsn]].copy()
-        t.columns = ["Attorney","Date","Sub Status","Reason"]
-        t["Attorney"] = t["Attorney"].astype(str).str.strip()
-        t = t[t["Attorney"].isin(EP_NAMES)].copy()
+    # Estate Planning inclusion audit
+    with st.expander("🔬 Estate Planning Inclusion Audit", expanded=False):
+        EP_NAMES = ["Connor Watkins", "Jennifer Fox", "Rebecca Megel"]
 
-        # parse using the same helpers as main logic
-        dt = _to_ts(t["Date"])
-        t["Date"] = dt
-        t["Source"] = src
-        t["InRange"] = (dt.dt.date >= start_date) & (dt.dt.date <= end_date)
-        t["IsFollowUp"] = t["Sub Status"].astype(str).str.strip().str.lower().eq("follow up")
-        # Check for "Canceled Meeting" or "No Show" in reason
-        reason_str = t["Reason"].astype(str).str.strip().str.lower()
-        t["HasCanceledMeeting"] = reason_str.str.contains("canceled meeting", na=False)
-        t["HasNoShow"] = reason_str.str.contains("no show", na=False)
-        t["Included"] = t["InRange"] & ~t["IsFollowUp"] & ~t["HasCanceledMeeting"] & ~t["HasNoShow"]
-        return t
+        def _audit_sheet(df: pd.DataFrame, att_idx: int, date_idx: int, sub_idx: int, reason_idx: int, src: str) -> pd.DataFrame:
+            if not isinstance(df, pd.DataFrame) or df.empty or df.shape[1] <= max(att_idx, date_idx, sub_idx, reason_idx):
+                return pd.DataFrame(columns=["Attorney","Date","Source","Sub Status","Reason","InRange","IsFollowUp","HasCanceledMeeting","HasNoShow","Included"])
+            att, dtc, sub, rsn = df.columns[att_idx], df.columns[date_idx], df.columns[sub_idx], df.columns[reason_idx]
+            t = df[[att, dtc, sub, rsn]].copy()
+            t.columns = ["Attorney","Date","Sub Status","Reason"]
+            t["Attorney"] = t["Attorney"].astype(str).str.strip()
+            t = t[t["Attorney"].isin(EP_NAMES)].copy()
 
-    ic_audit = _audit_sheet(df_init, 11, 12, 6, 8, "IC") if isinstance(df_init, pd.DataFrame) else pd.DataFrame()
-    dm_audit = _audit_sheet(df_disc, 11, 15, 6, 8, "DM") if isinstance(df_disc, pd.DataFrame) else pd.DataFrame()
-    ep_audit = pd.concat([ic_audit, dm_audit], ignore_index=True) if not ic_audit.empty or not dm_audit.empty else pd.DataFrame()
+            # parse using the same helpers as main logic
+            dt = _to_ts(t["Date"])
+            t["Date"] = dt
+            t["Source"] = src
+            t["InRange"] = (dt.dt.date >= start_date) & (dt.dt.date <= end_date)
+            t["IsFollowUp"] = t["Sub Status"].astype(str).str.strip().str.lower().eq("follow up")
+            # Check for "Canceled Meeting" or "No Show" in reason
+            reason_str = t["Reason"].astype(str).str.strip().str.lower()
+            t["HasCanceledMeeting"] = reason_str.str.contains("canceled meeting", na=False)
+            t["HasNoShow"] = reason_str.str.contains("no show", na=False)
+            t["Included"] = t["InRange"] & ~t["IsFollowUp"] & ~t["HasCanceledMeeting"] & ~t["HasNoShow"]
+            return t
 
-    if ep_audit.empty:
-        st.info("No Estate Planning rows found in the current window.")
-    else:
-        summary = ep_audit.groupby(["Attorney","Source"], dropna=False).agg(
-            total=("Included", "size"),
-            in_range=("InRange","sum"),
-            excluded_followup=("IsFollowUp","sum"),
-            excluded_canceled=("HasCanceledMeeting","sum"),
-            excluded_noshow=("HasNoShow","sum"),
-            included=("Included","sum"),
-        ).reset_index()
-        st.write("Estate Planning — summary by attorney & source:", summary)
-        st.write("**EP totals — Included = met (IC+DM):**", int(ep_audit["Included"].sum()))
-        show_cols = ["Attorney","Date","Source","Sub Status","Reason","InRange","IsFollowUp","HasCanceledMeeting","HasNoShow","Included"]
-        st.dataframe(ep_audit[show_cols].sort_values(["Date","Attorney"]).reset_index(drop=True),
-                     use_container_width=True)
+        ic_audit = _audit_sheet(df_init, 11, 12, 6, 8, "IC") if isinstance(df_init, pd.DataFrame) else pd.DataFrame()
+        dm_audit = _audit_sheet(df_disc, 11, 15, 6, 8, "DM") if isinstance(df_disc, pd.DataFrame) else pd.DataFrame()
+        ep_audit = pd.concat([ic_audit, dm_audit], ignore_index=True) if not ic_audit.empty or not dm_audit.empty else pd.DataFrame()
 
+        if ep_audit.empty:
+            st.info("No Estate Planning rows found in the current window.")
+        else:
+            summary = ep_audit.groupby(["Attorney","Source"], dropna=False).agg(
+                total=("Included", "size"),
+                in_range=("InRange","sum"),
+                excluded_followup=("IsFollowUp","sum"),
+                excluded_canceled=("HasCanceledMeeting","sum"),
+                excluded_noshow=("HasNoShow","sum"),
+                included=("Included","sum"),
+            ).reset_index()
+            st.write("Estate Planning — summary by attorney & source:", summary)
+            st.write("**EP totals — Included = met (IC+DM):**", int(ep_audit["Included"].sum()))
+            show_cols = ["Attorney","Date","Source","Sub Status","Reason","InRange","IsFollowUp","HasCanceledMeeting","HasNoShow","Included"]
+            st.dataframe(ep_audit[show_cols].sort_values(["Date","Attorney"]).reset_index(drop=True),
+                         use_container_width=True)
 
-# ───────────────────────────────────────────────────────────────────────────────
-# Debug details
-# ───────────────────────────────────────────────────────────────────────────────
-with st.expander("Debug details (for reconciliation)", expanded=False):
-    if not df_leads.empty and "Stage" in df_leads.columns and len(leads_in_range) == len(df_leads):
-        st.write("Leads_PNCs — Stage (in selected period)",
-                 df_leads.loc[leads_in_range, "Stage"].value_counts(dropna=False))
-    if not init_in.empty:
-        st.write("Initial_Consultation — in range", init_in.shape)
-    if not disc_in.empty:
-        st.write("Discovery_Meeting — in range", disc_in.shape)
-    if ncl_flag_col:
-        st.write("New Client List — Retained split (in range)", ncl_in[ncl_flag_col].value_counts(dropna=False))
-    st.write(
-        f"Computed: Leads={row1}, PNCs={row2}, "
-        f"Retained w/out consult={row3}, Scheduled={row4} ({row5}%), "
-        f"Showed={row6} ({row7}%), Retained after consult={row8} ({row9}%), "
-        f"Total retained={row10} ({row11}%)"
-    )
-# ───────────────────────────────────────────────────────────────────────────────
-# 🔬 Estate Planning — inclusion audit (IC: L/M/G/I, DM: L/P/G/I)
-# ───────────────────────────────────────────────────────────────────────────────
-with st.expander("🔬 Estate Planning — inclusion audit (why met != your expectation?)", expanded=False):
-    EP_NAMES = ["Connor Watkins", "Jennifer Fox", "Rebecca Megel"]
+    # General debug details
+    with st.expander("📈 General Debug Details", expanded=False):
+        if not df_leads.empty and "Stage" in df_leads.columns and len(leads_in_range) == len(df_leads):
+            st.write("Leads_PNCs — Stage (in selected period)",
+                     df_leads.loc[leads_in_range, "Stage"].value_counts(dropna=False))
+        if not init_in.empty:
+            st.write("Initial_Consultation — in range", init_in.shape)
+        if not disc_in.empty:
+            st.write("Discovery_Meeting — in range", disc_in.shape)
+        if ncl_flag_col:
+            st.write("New Client List — Retained split (in range)", ncl_in[ncl_flag_col].value_counts(dropna=False))
+        st.write(
+            f"Computed: Leads={row1}, PNCs={row2}, "
+            f"Retained w/out consult={row3}, Scheduled={row4} ({row5}%), "
+            f"Showed={row6} ({row7}%), Retained after consult={row8} ({row9}%), "
+            f"Total retained={row10} ({row11}%)"
+        )
 
-    def _audit_sheet(df: pd.DataFrame, att_idx: int, date_idx: int, sub_idx: int, reason_idx: int, src: str) -> pd.DataFrame:
-        if not isinstance(df, pd.DataFrame) or df.empty or df.shape[1] <= max(att_idx, date_idx, sub_idx, reason_idx):
-            return pd.DataFrame(columns=["Attorney","Date","Source","Sub Status","Reason","InRange","IsFollowUp","HasCanceledMeeting","HasNoShow","Included"])
-        att, dtc, sub, rsn = df.columns[att_idx], df.columns[date_idx], df.columns[sub_idx], df.columns[reason_idx]
-        t = df[[att, dtc, sub, rsn]].copy()
-        t.columns = ["Attorney","Date","Sub Status","Reason"]
-        t["Attorney"] = t["Attorney"].astype(str).str.strip()
-        t = t[t["Attorney"].isin(EP_NAMES)].copy()
-
-        # same parsing rules used in the main logic
-        x = t["Date"].astype(str)
-        x = x.str.replace("–","-", regex=False).str.replace(","," ", regex=False)
-        x = x.str.replace(r"\s+at\s+"," ", regex=True).str.replace(r"\s+(ET|EDT|EST|CT|CDT|CST|MT|MDT|MST|PT|PDT)\b","", regex=True)
-        x = x.str.replace(r"(\d)(am|pm)\b", r"\1 \2", regex=True)
-        x = x.str.replace(r"\s+"," ", regex=True).str.strip()
-        dt = pd.to_datetime(x, errors="coerce", format="mixed")
-        if dt.isna().any():
-            y = dt.copy()
-            for fmt in ("%m/%d/%Y %I:%M %p", "%m/%d/%Y %H:%M", "%Y-%m-%d %H:%M", "%m/%d/%Y"):
-                mask = y.isna()
-                if not mask.any(): break
-                try:
-                    y.loc[mask] = pd.to_datetime(x.loc[mask], format=fmt, errors="coerce")
-                except Exception:
-                    pass
-            dt = y
-        try: dt = dt.dt.tz_localize(None)
-        except Exception: pass
-
-        t["Date"] = dt
-        t["Source"] = src
-        t["InRange"] = (t["Date"] >= pd.Timestamp(start_date)) & (t["Date"] <= pd.Timestamp(end_date))
-        t["IsFollowUp"] = t["Sub Status"].astype(str).str.strip().str.lower().eq("follow up")
-
-        # Check for "Canceled Meeting" or "No Show" in reason
-        reason_str = t["Reason"].astype(str).str.strip().str.lower()
-        t["HasCanceledMeeting"] = reason_str.str.contains("canceled meeting", na=False)
-        t["HasNoShow"] = reason_str.str.contains("no show", na=False)
-
-        t["Included"] = t["InRange"] & ~t["IsFollowUp"] & ~t["HasCanceledMeeting"] & ~t["HasNoShow"]
-        return t
-
-    # IC: L=11 (att), M=12 (date), G=6 (sub), I=8 (reason)
-    ic_audit = _audit_sheet(df_init, 11, 12, 6, 8, "IC") if isinstance(df_init, pd.DataFrame) else pd.DataFrame()
-    # DM: L=11 (att), P=15 (date), G=6 (sub), I=8 (reason)
-    dm_audit = _audit_sheet(df_disc, 11, 15, 6, 8, "DM") if isinstance(df_disc, pd.DataFrame) else pd.DataFrame()
-
-    ep_audit = pd.concat([ic_audit, dm_audit], ignore_index=True) if not ic_audit.empty or not dm_audit.empty else pd.DataFrame()
-
-    if ep_audit.empty:
-        st.info("No Estate Planning rows found in the current window.")
-    else:
-        # Summary by attorney/source
-        summary = ep_audit.groupby(["Attorney","Source"], dropna=False).agg(
-            total=("Included", "size"),
-            in_range=("InRange","sum"),
-            excluded_followup=("IsFollowUp","sum"),
-            excluded_canceled=("HasCanceledMeeting","sum"),
-            excluded_noshow=("HasNoShow","sum"),
-            included=("Included","sum"),
-        ).reset_index()
-        st.write("Estate Planning — summary by attorney & source:", summary)
-
-        # Grand totals for EP
-        st.write("**EP totals — Included = met (IC+DM):**", int(ep_audit["Included"].sum()))
-        st.caption("If your expected 23 ≠ Included total, the row-level table below shows each excluded row and why.")
-
-        # Row-level view (you can filter in the UI)
-        show_cols = ["Attorney","Date","Source","Sub Status","Reason","InRange","IsFollowUp","HasCanceledMeeting","HasNoShow","Included"]
-        st.dataframe(ep_audit[show_cols].sort_values(["Date","Attorney"]).reset_index(drop=True), use_container_width=True)
-
-# ───────────────────────────────────────────────────────────────────────────────
-# Quiet logs (optional)
-# ───────────────────────────────────────────────────────────────────────────────
-with st.expander("ℹ️ Logs (tech details)", expanded=False):
-    if st.session_state["logs"]:
-        for line in st.session_state["logs"]:
-            st.code(line)
-    else:
-        st.caption("No technical logs this session.")
+    # Technical logs
+    with st.expander("ℹ️ Technical Logs", expanded=False):
+        if st.session_state["logs"]:
+            for line in st.session_state["logs"]:
+                st.code(line)
+        else:
+            st.caption("No technical logs this session.")
