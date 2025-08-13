@@ -1178,6 +1178,59 @@ def _to_ts(series: pd.Series) -> pd.Series:
         pass
     return x
 
+# --- REQUIRED: smarter column picker (place BEFORE _met_counts_from_ic_dm_fuzzy) ---
+import re
+
+def _norm_header(s: str) -> str:
+    s = str(s).lower().strip()
+    s = re.sub(r"[\s_]+", " ", s)
+    s = re.sub(r"[^a-z0-9 ]", "", s)
+    return s
+
+def _pick_col_strict(
+    df: pd.DataFrame,
+    must_have_tokens: list[str],
+    avoid_tokens: list[str] | None = None,
+    prefer_exact: list[str] | None = None,
+) -> str | None:
+    """
+    Choose a column whose normalized name:
+      • contains ALL tokens in must_have_tokens
+      • and (if avoid_tokens given) contains NONE of those tokens
+      • and (if prefer_exact given) prefers exact normalized matches
+    If multiple match, returns the best by strength (prefer_exact > shortest normalized name).
+    """
+    if df is None or df.empty:
+        return None
+    avoid = [ _norm_header(t) for t in (avoid_tokens or []) if str(t).strip() ]
+    must  = [ _norm_header(t) for t in (must_have_tokens or []) if str(t).strip() ]
+    cols  = list(df.columns)
+    norms = { c: _norm_header(c) for c in cols }
+
+    # candidates must include ALL tokens
+    cands = [ c for c in cols if all(tok in norms[c] for tok in must) ]
+    if not cands:
+        return None
+
+    # drop any candidate that contains avoid tokens
+    if avoid:
+        kept = [ c for c in cands if not any(av in norms[c] for av in avoid) ]
+        if kept:
+            cands = kept
+
+    # prefer exact matches if requested
+    if prefer_exact:
+        prefer_norm = [ _norm_header(x) for x in prefer_exact ]
+        exacts = [ c for c in cands if norms[c] in prefer_norm ]
+        if exacts:
+            exacts.sort(key=lambda c: len(norms[c]))  # pick the shortest exact
+            return exacts[0]
+
+    # fallback: shortest normalized candidate
+    cands.sort(key=lambda c: len(norms[c]))
+    return cands[0]
+
+
 def _met_counts_from_ic_dm_fuzzy(ic_df: pd.DataFrame, dm_df: pd.DataFrame, sd, ed) -> dict:
     """Count 'PNCs who met' per attorney from IC+DM with fuzzy columns + robust dates."""
     buckets = []
