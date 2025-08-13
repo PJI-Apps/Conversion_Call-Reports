@@ -126,34 +126,72 @@ def _gsheet_client():
 GC, GSHEET = _gsheet_client()
 
 def _ws(title: str):
-    """Safe worksheet getter/creator."""
-    if GSHEET is None: return None
-    import gspread
+    """Idempotent, race-safe worksheet getter/creator.
+
+    Guarantees:
+      • If a worksheet with `title` already exists, returns it without error.
+      • If it does not exist, creates it once and returns it.
+      • Uses fallbacks in TAB_FALLBACKS when present.
+    """
+    if GSHEET is None:
+        return None
+
+    import time
     from gspread.exceptions import APIError, WorksheetNotFound
-    for delay in (0.0, 0.8, 1.6):
+
+    # 1) Fast path: try fetching a few times (transient errors happen)
+    for delay in (0.0, 0.6, 1.2):
         try:
-            if delay: import time; time.sleep(delay)
+            if delay:
+                time.sleep(delay)
             return GSHEET.worksheet(title)
         except WorksheetNotFound:
-            break
+            # Double-check via full listing to avoid stale lookup cache
+            try:
+                existing_titles = {ws.title for ws in GSHEET.worksheets()}
+                if title in existing_titles:
+                    return GSHEET.worksheet(title)
+            except Exception:
+                pass
+            break  # not found after double-check; move on to fallbacks/create
         except APIError:
+            # e.g., rate limit/5xx; retry
             continue
         except Exception:
             continue
+
+    # 2) Fallback titles (legacy tab names)
     for fb in TAB_FALLBACKS.get(title, []):
         try:
             return GSHEET.worksheet(fb)
         except Exception:
             continue
+
+    # 3) Create only if truly absent; treat ALREADY_EXISTS as success
     try:
         GSHEET.add_worksheet(title=title, rows=2000, cols=40)
         return GSHEET.worksheet(title)
-    except Exception as e:
+    except APIError as e:
+        # If another writer created it milliseconds before us, Google returns ALREADY_EXISTS.
+        if "already exists" in str(e).lower():
+            try:
+                return GSHEET.worksheet(title)
+            except Exception:
+                pass
+        # Some APIErrors are retryable; try one last fetch before failing silently
         try:
             return GSHEET.worksheet(title)
         except Exception:
-            st.error(f"Could not access/create worksheet '{title}': {e}")
-            return None
+            pass
+    except Exception:
+        try:
+            return GSHEET.worksheet(title)
+        except Exception:
+            pass
+
+    st.error(f"Could not access/create worksheet '{title}'. Please check permissions and tab names.")
+    return None
+
 
 def _clean_datestr(x):
     if pd.isna(x): return x
