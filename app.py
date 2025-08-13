@@ -1391,6 +1391,80 @@ with st.expander("Debug details (for reconciliation)", expanded=False):
         f"Showed={row6} ({row7}%), Retained after consult={row8} ({row9}%), "
         f"Total retained={row10} ({row11}%)"
     )
+# ───────────────────────────────────────────────────────────────────────────────
+# 🔬 Estate Planning — inclusion audit (IC: L/M/G/I, DM: L/P/G/I)
+# ───────────────────────────────────────────────────────────────────────────────
+with st.expander("🔬 Estate Planning — inclusion audit (why met != your expectation?)", expanded=False):
+    EP_NAMES = ["Connor Watkins", "Jennifer Fox", "Rebecca Megel"]
+
+    def _audit_sheet(df: pd.DataFrame, att_idx: int, date_idx: int, sub_idx: int, reason_idx: int, src: str) -> pd.DataFrame:
+        if not isinstance(df, pd.DataFrame) or df.empty or df.shape[1] <= max(att_idx, date_idx, sub_idx, reason_idx):
+            return pd.DataFrame(columns=["Attorney","Date","Source","Sub Status","Reason","InRange","IsFollowUp","HasReason","Included"])
+        att, dtc, sub, rsn = df.columns[att_idx], df.columns[date_idx], df.columns[sub_idx], df.columns[reason_idx]
+        t = df[[att, dtc, sub, rsn]].copy()
+        t.columns = ["Attorney","Date","Sub Status","Reason"]
+        t["Attorney"] = t["Attorney"].astype(str).str.strip()
+        t = t[t["Attorney"].isin(EP_NAMES)].copy()
+
+        # same parsing rules used in the main logic
+        x = t["Date"].astype(str)
+        x = x.str.replace("–","-", regex=False).str.replace(","," ", regex=False)
+        x = x.str.replace(r"\s+at\s+"," ", regex=True).str.replace(r"\s+(ET|EDT|EST|CT|CDT|CST|MT|MDT|MST|PT|PDT)\b","", regex=True)
+        x = x.str.replace(r"(\d)(am|pm)\b", r"\1 \2", regex=True)
+        x = x.str.replace(r"\s+"," ", regex=True).str.strip()
+        dt = pd.to_datetime(x, errors="coerce", infer_datetime_format=True)
+        if dt.isna().any():
+            y = dt.copy()
+            for fmt in ("%m/%d/%Y %I:%M %p", "%m/%d/%Y %H:%M", "%Y-%m-%d %H:%M", "%m/%d/%Y"):
+                mask = y.isna()
+                if not mask.any(): break
+                try:
+                    y.loc[mask] = pd.to_datetime(x.loc[mask], format=fmt, errors="coerce")
+                except Exception:
+                    pass
+            dt = y
+        try: dt = dt.dt.tz_localize(None)
+        except Exception: pass
+
+        t["Date"] = dt
+        t["Source"] = src
+        t["InRange"] = (t["Date"] >= pd.Timestamp(start_date)) & (t["Date"] <= pd.Timestamp(end_date))
+        t["IsFollowUp"] = t["Sub Status"].astype(str).str.strip().str.lower().eq("follow up")
+
+        # any non-empty Reason must exclude; treat pure blanks only as blank
+        reason_s = t["Reason"].astype(str)
+        t["HasReason"] = ~(reason_s.isna() | (reason_s.str.strip() == "") | reason_s.str.lower().isin(["nan","none","na","null"]))
+
+        t["Included"] = t["InRange"] & ~t["IsFollowUp"] & ~t["HasReason"]
+        return t
+
+    # IC: L=11 (att), M=12 (date), G=6 (sub), I=8 (reason)
+    ic_audit = _audit_sheet(df_init, 11, 12, 6, 8, "IC") if isinstance(df_init, pd.DataFrame) else pd.DataFrame()
+    # DM: L=11 (att), P=15 (date), G=6 (sub), I=8 (reason)
+    dm_audit = _audit_sheet(df_disc, 11, 15, 6, 8, "DM") if isinstance(df_disc, pd.DataFrame) else pd.DataFrame()
+
+    ep_audit = pd.concat([ic_audit, dm_audit], ignore_index=True) if not ic_audit.empty or not dm_audit.empty else pd.DataFrame()
+
+    if ep_audit.empty:
+        st.info("No Estate Planning rows found in the current window.")
+    else:
+        # Summary by attorney/source
+        summary = ep_audit.groupby(["Attorney","Source"], dropna=False).agg(
+            total=("Included", "size"),
+            in_range=("InRange","sum"),
+            excluded_followup=("IsFollowUp","sum"),
+            excluded_reason=("HasReason","sum"),
+            included=("Included","sum"),
+        ).reset_index()
+        st.write("Estate Planning — summary by attorney & source:", summary)
+
+        # Grand totals for EP
+        st.write("**EP totals — Included = met (IC+DM):**", int(ep_audit["Included"].sum()))
+        st.caption("If your expected 23 ≠ Included total, the row-level table below shows each excluded row and why.")
+
+        # Row-level view (you can filter in the UI)
+        show_cols = ["Attorney","Date","Source","Sub Status","Reason","InRange","IsFollowUp","HasReason","Included"]
+        st.dataframe(ep_audit[show_cols].sort_values(["Date","Attorney"]).reset_index(drop=True), use_container_width=True)
 
 # ───────────────────────────────────────────────────────────────────────────────
 # Quiet logs (optional)
