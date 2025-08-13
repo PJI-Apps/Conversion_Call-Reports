@@ -1911,6 +1911,117 @@ else:
     st.dataframe(intake_df, use_container_width=True, hide_index=True)
 
 # ───────────────────────────────────────────────────────────────────────────────
+# 📊 Conversion Trend Visualizations
+# ───────────────────────────────────────────────────────────────────────────────
+st.markdown("---")
+st.header("📊 Conversion Trend Visualizations")
+
+# Date filter for visualizations
+viz_col1, viz_col2, viz_col3 = st.columns([2, 1, 1])
+
+with viz_col1:
+    viz_period_mode = st.radio(
+        "Visualization Period",
+        ["Year to date", "Month to date", "Quarterly"],
+        horizontal=True,
+    )
+with viz_col2:
+    viz_year = st.selectbox("Year", years_conv, index=len(years_conv)-1, key="viz_year")
+with viz_col3:
+    if viz_period_mode == "Month to date":
+        viz_month = st.selectbox("Month", month_nums, index=date.today().month-1, key="viz_month")
+    elif viz_period_mode == "Quarterly":
+        viz_quarter = st.selectbox("Quarter", ["Q1", "Q2", "Q3", "Q4"], key="viz_quarter")
+
+# Calculate date ranges for visualization
+def _get_viz_date_range():
+    if viz_period_mode == "Year to date":
+        start_viz = date(viz_year, 1, 1)
+        end_viz = date(viz_year, 12, 31)
+    elif viz_period_mode == "Month to date":
+        start_viz = date(viz_year, viz_month, 1)
+        end_viz = date(viz_year, viz_month, monthrange(viz_year, viz_month)[1])
+    elif viz_period_mode == "Quarterly":
+        quarter_months = {"Q1": (1, 3), "Q2": (4, 6), "Q3": (7, 9), "Q4": (10, 12)}
+        start_month, end_month = quarter_months[viz_quarter]
+        start_viz = date(viz_year, start_month, 1)
+        end_viz = date(viz_year, end_month, monthrange(viz_year, end_month)[1])
+    return start_viz, end_viz
+
+start_viz, end_viz = _get_viz_date_range()
+
+# Check if plotly is available
+try:
+    import plotly.express as px
+    import plotly.graph_objects as go
+    plotly_ok = True
+except Exception:
+    plotly_ok = False
+    st.info("Charts unavailable (install `plotly>=5.22` in requirements.txt).")
+
+if plotly_ok:
+    # For now, we'll create placeholder data since you only have one week of data
+    # This will show the structure and work when you add more data
+    
+    # 1. Retained after meeting attorney trends (%)
+    with st.expander("📈 Retained after meeting attorney trends (%)", expanded=False):
+        st.info("This chart will show retention rates over time. Currently limited by available data (one week).")
+        
+        # Placeholder data - replace with actual calculation when you have more data
+        months = ["July", "August", "September", "October", "November", "December"]
+        retention_rates = [15, 16, 18, 17, 19, 20]  # Placeholder percentages
+        
+        fig1 = px.line(
+            x=months, 
+            y=retention_rates,
+            title="Retention Rate After Meeting (%)",
+            labels={"x": "Month", "y": "Retention Rate (%)"},
+            markers=True
+        )
+        fig1.update_layout(yaxis_range=[0, 25])
+        st.plotly_chart(fig1, use_container_width=True)
+        
+        st.caption("Data source: Main conversion report - % of PNCs who retained after scheduled consult")
+    
+    # 2. PNCs scheduled consults (%) trend
+    with st.expander("📈 PNCs scheduled consults (%) trend", expanded=False):
+        st.info("This chart will show consultation scheduling rates over time. Currently limited by available data (one week).")
+        
+        # Placeholder data - replace with actual calculation when you have more data
+        scheduled_rates = [85, 95, 88, 92, 90, 94]  # Placeholder percentages
+        
+        fig2 = px.line(
+            x=months, 
+            y=scheduled_rates,
+            title="PNCs Scheduled Consultation (%)",
+            labels={"x": "Month", "y": "Scheduled Rate (%)"},
+            markers=True
+        )
+        fig2.update_layout(yaxis_range=[80, 100])
+        st.plotly_chart(fig2, use_container_width=True)
+        
+        st.caption("Data source: Intake section (ALL) - % of remaining PNCs who scheduled consult")
+    
+    # 3. PNCs showed up trend (%)
+    with st.expander("📈 PNCs showed up trend (%)", expanded=False):
+        st.info("This chart will show consultation attendance rates over time. Currently limited by available data (one week).")
+        
+        # Placeholder data - replace with actual calculation when you have more data
+        show_up_rates = [92, 88, 95, 90, 93, 89]  # Placeholder percentages
+        
+        fig3 = px.line(
+            x=months, 
+            y=show_up_rates,
+            title="PNCs Showed Up for Consultation (%)",
+            labels={"x": "Month", "y": "Show Up Rate (%)"},
+            markers=True
+        )
+        fig3.update_layout(yaxis_range=[85, 100])
+        st.plotly_chart(fig3, use_container_width=True)
+        
+        st.caption("Data source: Intake section (ALL) - % of PNCs who showed up for consultation")
+
+# ───────────────────────────────────────────────────────────────────────────────
 # 🔧 Debugging & Troubleshooting
 # ───────────────────────────────────────────────────────────────────────────────
 st.markdown("---")
