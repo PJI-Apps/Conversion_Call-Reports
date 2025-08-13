@@ -104,38 +104,19 @@ def _gsheet_client_cached():
     sa = st.secrets.get("gcp_service_account", None)
     if not sa:
         raw = st.secrets.get("gcp_service_account_json", None)
-        if raw: 
-            try:
-                sa = json.loads(raw)
-            except json.JSONDecodeError as e:
-                st.error(f"Failed to parse service account JSON: {e}")
-                return None, None
+        if raw: sa = json.loads(raw)
     ms = st.secrets.get("master_store", None)
     if not sa or not ms or "sheet_url" not in ms:
         return None, None
     if "client_email" not in sa:
         raise ValueError("Service account object missing 'client_email'")
     scopes = ["https://www.googleapis.com/auth/spreadsheets"]
-    try:
-        creds = Credentials.from_service_account_info(sa, scopes)
-    except Exception as e:
-        st.error(f"Failed to create credentials: {e}")
-        st.error(f"Service account type: {type(sa)}")
-        if isinstance(sa, dict):
-            st.error(f"Service account keys: {list(sa.keys())}")
-        return None, None
+    creds = Credentials.from_service_account_info(sa, scopes)
     gc = gspread.authorize(creds)
     sh = gc.open_by_url(ms["sheet_url"])
     return gc, sh
 
-def _gsheet_client():
-    try:
-        return _gsheet_client_cached()
-    except Exception as e:
-        st.error(f"Google Sheets connection failed: {e}")
-        return None, None
-
-GC, GSHEET = _gsheet_client()
+GC, GSHEET = _gsheet_client_cached()
 
 def _ws(title: str):
     """Simplified worksheet getter/creator with better error handling."""
