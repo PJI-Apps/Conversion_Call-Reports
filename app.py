@@ -104,14 +104,26 @@ def _gsheet_client_cached():
     sa = st.secrets.get("gcp_service_account", None)
     if not sa:
         raw = st.secrets.get("gcp_service_account_json", None)
-        if raw: sa = json.loads(raw)
+        if raw: 
+            try:
+                sa = json.loads(raw)
+            except json.JSONDecodeError as e:
+                st.error(f"Failed to parse service account JSON: {e}")
+                return None, None
     ms = st.secrets.get("master_store", None)
     if not sa or not ms or "sheet_url" not in ms:
         return None, None
     if "client_email" not in sa:
         raise ValueError("Service account object missing 'client_email'")
     scopes = ["https://www.googleapis.com/auth/spreadsheets"]
-    creds = Credentials.from_service_account_info(sa, scopes)
+    try:
+        creds = Credentials.from_service_account_info(sa, scopes)
+    except Exception as e:
+        st.error(f"Failed to create credentials: {e}")
+        st.error(f"Service account type: {type(sa)}")
+        if isinstance(sa, dict):
+            st.error(f"Service account keys: {list(sa.keys())}")
+        return None, None
     gc = gspread.authorize(creds)
     sh = gc.open_by_url(ms["sheet_url"])
     return gc, sh
@@ -370,47 +382,7 @@ def render_admin_sidebar():
                     else:              st.session_state.get("hashes_conv", set()).clear()
                     st.session_state["gs_ver"] += 1; st.rerun()
 
-        # New batch management section
-        with st.container(border=True):
-            st.markdown("**Batch Management (Call Reports)**")
-            st.caption("Manage weekly batches of Call Report data.")
-            
-            if key == "CALLS":
-                df_calls = _read_ws_by_name("CALLS")
-                if not df_calls.empty and "__batch_id" in df_calls.columns:
-                    # Show existing batches
-                    batches = df_calls["__batch_id"].value_counts().sort_index()
-                    st.write("**Existing batches:**")
-                    for batch, count in batches.items():
-                        st.write(f"• {batch}: {count} records")
-                    
-                    # Batch removal options
-                    col1, col2 = st.columns(2)
-                    with col1:
-                        batch_to_remove = st.selectbox("Select batch to remove", 
-                                                     options=[""] + list(batches.index),
-                                                     key="batch_remove_select")
-                    with col2:
-                        if st.button("Remove Selected Batch", 
-                                   disabled=not batch_to_remove,
-                                   use_container_width=True):
-                            if batch_to_remove:
-                                before = len(df_calls)
-                                df_filtered = df_calls[df_calls["__batch_id"] != batch_to_remove].copy()
-                                after = len(df_filtered)
-                                removed = before - after
-                                
-                                success = _write_ws_by_name("CALLS", df_filtered)
-                                if success:
-                                    st.success(f"Removed batch '{batch_to_remove}': {removed} records deleted")
-                                    st.session_state["gs_ver"] += 1
-                                    st.rerun()
-                                else:
-                                    st.error("Failed to remove batch")
-                else:
-                    st.info("No batch data found. Enable 'Add batch identifier' when uploading Call Reports.")
-            else:
-                st.info("Batch management is only available for Call Reports.")
+
 
         # Data inspection section
         with st.container(border=True):
@@ -639,38 +611,14 @@ if "hashes_calls" not in st.session_state: st.session_state["hashes_calls"] = se
 if "hashes_conv"  not in st.session_state: st.session_state["hashes_conv"]  = set()
 
 with st.expander("🧾 Data Upload (Calls & Conversion)", expanded=st.session_state.get("exp_upload_open", False)):
-    # Clear session state for re-uploads
-    col1, col2 = st.columns(2)
-    with col1:
-        if st.button("🔄 Clear session cache (allow re-uploads)", use_container_width=True):
-            st.session_state.get("hashes_calls", set()).clear()
-            st.session_state.get("hashes_conv", set()).clear()
-            st.success("Session cache cleared. You can now re-upload files.")
-            st.rerun()
-    
-    with col2:
-        if st.button("📊 Show current data summary", use_container_width=True):
-            st.info("Current data in Google Sheets:")
-            for key, name in TAB_NAMES.items():
-                df = _read_ws_by_name(key)
-                if not df.empty:
-                    st.write(f"**{name}**: {len(df)} rows")
-                else:
-                    st.write(f"**{name}**: Empty")
+    # Allow re-upload of the same files this session
+    if st.button("Allow re-upload of the same files this session"):
+        st.session_state.get("hashes_calls", set()).clear()
+        st.session_state.get("hashes_conv", set()).clear()
+        st.success("Re-upload enabled for this session.")
+        st.rerun()
 
     calls_period_key, calls_uploader = upload_section("zoom_calls", "Zoom Calls", "exp_upload_open")
-    
-    # Improved Call Report handling with batch identification
-    st.markdown("**Call Report Options:**")
-    call_options = st.columns(3)
-    with call_options[0]:
-        force_replace_calls = st.checkbox("Replace existing month data", key="force_calls_replace")
-    with call_options[1]:
-        add_batch_id = st.checkbox("Add batch identifier", key="add_batch_id", value=True)
-    with call_options[2]:
-        batch_id = st.text_input("Batch ID (optional)", 
-                                value=f"Week_{date.today().isocalendar()[1]}", 
-                                key="batch_id")
 
     c1, c2 = st.columns(2)
     upload_start = c1.date_input("Conversion upload start date",
@@ -722,84 +670,37 @@ with st.expander("🧾 Data Upload (Calls & Conversion)", expanded=st.session_st
         df.columns = [str(c).strip() for c in df.columns]
         return df
 
-    # Calls processing with improved batch handling
+    # Calls processing
     if calls_uploader:
-        CALLS_MASTER_COLS = [
-            "Category","Name","Total Calls","Completed Calls","Outgoing","Received",
-            "Forwarded to Voicemail","Answered by Other","Missed",
-            "Avg Call Time","Total Call Time","Total Hold Time","Month-Year"
-        ]
-        
-        # Add batch columns if requested
-        if add_batch_id:
-            CALLS_MASTER_COLS.extend(["__batch_start", "__batch_end", "__batch_id"])
-        
         try:
             fhash = file_md5(calls_uploader)
-            month_exists = False
-            batch_exists = False
-            
-            try:
-                existing = _read_ws_by_name("CALLS")
-                if isinstance(existing, pd.DataFrame) and not existing.empty:
-                    month_exists = existing["Month-Year"].astype(str).eq(calls_period_key).any()
-                    if add_batch_id and "__batch_id" in existing.columns:
-                        batch_exists = existing["__batch_id"].astype(str).eq(batch_id).any()
-            except Exception as e:
-                log(f"Month/batch existence check failed: {e}")
-
-            # Skip if same file and data already exists (unless force replace)
-            if fhash in st.session_state["hashes_calls"] and month_exists and not force_replace_calls:
-                st.caption("Calls: same file and month already present — upload skipped.")
+            if fhash in st.session_state["hashes_calls"]:
+                st.caption("Calls: same file already present — upload skipped.")
                 log("Calls upload skipped by session dedupe guard.")
             else:
                 raw = pd.read_csv(calls_uploader)
                 processed = process_calls_csv(raw, calls_period_key)
-                
-                # Add batch information if requested
-                if add_batch_id:
-                    processed["__batch_start"] = pd.to_datetime(calls_period_key + "-01")
-                    processed["__batch_end"] = pd.to_datetime(calls_period_key + "-31")
-                    processed["__batch_id"] = batch_id
-                
-                processed_clean = processed[CALLS_MASTER_COLS].copy()
+                processed_clean = processed[["Category","Name","Total Calls","Completed Calls","Outgoing","Received",
+                                           "Forwarded to Voicemail","Answered by Other","Missed",
+                                           "Avg Call Time","Total Call Time","Total Hold Time","Month-Year"]].copy()
 
                 if GSHEET is None:
                     st.warning("Master store not configured; Calls will not persist.")
                     df_calls_master = processed_clean.copy()
                 else:
                     current = _read_ws_by_name("CALLS")
-                    
-                    # Handle replacement logic
-                    if force_replace_calls and month_exists and not current.empty:
-                        if add_batch_id and batch_exists:
-                            # Remove specific batch
-                            current = current.loc[current["__batch_id"].astype(str).str.strip() != batch_id].copy()
-                        else:
-                            # Remove entire month
-                            current = current.loc[current["Month-Year"].astype(str).str.strip() != calls_period_key].copy()
-                    
                     combined = (pd.concat([current, processed_clean], ignore_index=True)
                                 if not current.empty else processed_clean.copy())
                     
-                    # Dedupe by month+name+category (and batch if applicable)
-                    if add_batch_id and "__batch_id" in combined.columns:
-                        key = (combined["Month-Year"].astype(str).str.strip() + "|" +
-                               combined["Name"].astype(str).str.strip() + "|" +
-                               combined["Category"].astype(str).str.strip() + "|" +
-                               combined["__batch_id"].astype(str).str.strip())
-                    else:
-                        key = (combined["Month-Year"].astype(str).str.strip() + "|" +
-                               combined["Name"].astype(str).str.strip() + "|" +
-                               combined["Category"].astype(str).str.strip())
-                    
+                    # Dedupe by month+name+category
+                    key = (combined["Month-Year"].astype(str).str.strip() + "|" +
+                           combined["Name"].astype(str).str.strip() + "|" +
+                           combined["Category"].astype(str).str.strip())
                     combined = combined.loc[~key.duplicated(keep="last")].copy()
                     
                     success = _write_ws_by_name("CALLS", combined)
                     if success:
                         st.success(f"Calls: upserted {len(processed_clean)} row(s) for {calls_period_key}")
-                        if add_batch_id:
-                            st.info(f"Batch ID: {batch_id}")
                     else:
                         st.error("Failed to save Calls data to Google Sheets")
                     
@@ -835,75 +736,7 @@ with st.expander("🧾 Data Upload (Calls & Conversion)", expanded=st.session_st
             if df_up is None or df_up.empty:
                 st.caption(f"{key_name}: file appears empty."); continue
 
-            # Add batch information for Leads
-            if key_name == "LEADS":
-                df_up["__batch_start"] = pd.to_datetime(upload_start)
-                df_up["__batch_end"]   = pd.to_datetime(upload_end)
-
-            # Fix column name variations
-            if key_name == "NCL" and "Retained with Consult (Y/N)" in df_up.columns \
-               and "Retained With Consult (Y/N)" not in df_up.columns:
-                df_up = df_up.rename(columns={"Retained with Consult (Y/N)":"Retained With Consult (Y/N)"})
-
             current = _read_ws_by_name(key_name)
-
-            # Handle replacement logic
-            if want_replace and not current.empty:
-                st.info(f"Replacing existing {key_name} data for date range {upload_start} to {upload_end}")
-                
-                if key_name == "LEADS":
-                    # For Leads, remove records that match the incoming data exactly
-                    key_in = (
-                        df_up.get("Email","").astype(str).str.strip() + "|" +
-                        df_up.get("Matter ID","").astype(str).str.strip() + "|" +
-                        df_up.get("Stage","").astype(str).str.strip() + "|" +
-                        df_up.get("Initial Consultation With Pji Law","").astype(str) + "|" +
-                        df_up.get("Discovery Meeting With Pji Law","").astype(str)
-                    )
-                    incoming_keys = set(key_in.tolist())
-                    key_cur = (
-                        current.get("Email","").astype(str).str.strip() + "|" +
-                        current.get("Matter ID","").astype(str).str.strip() + "|" +
-                        current.get("Stage","").astype(str).str.strip() + "|" +
-                        current.get("Initial Consultation With Pji Law","").astype(str) + "|" +
-                        current.get("Discovery Meeting With Pji Law","").astype(str)
-                    )
-                    mask_keep = ~key_cur.isin(incoming_keys)
-                    removed_count = (~mask_keep).sum()
-                    current = current.loc[mask_keep].copy()
-                    st.info(f"Removed {removed_count} existing Leads records that match incoming data")
-                    
-                elif key_name == "INIT":
-                    col = "Initial Consultation With Pji Law"
-                    if col in current.columns:
-                        drop_mask = _mask_by_range(current, col)
-                        removed_count = drop_mask.sum()
-                        current = current.loc[~drop_mask].copy()
-                        st.info(f"Removed {removed_count} existing Initial Consultation records in date range")
-                    else:
-                        st.warning(f"Column '{col}' not found in existing {key_name} data")
-                        
-                elif key_name == "DISC":
-                    col = "Discovery Meeting With Pji Law"
-                    if col in current.columns:
-                        drop_mask = _mask_by_range(current, col)
-                        removed_count = drop_mask.sum()
-                        current = current.loc[~drop_mask].copy()
-                        st.info(f"Removed {removed_count} existing Discovery Meeting records in date range")
-                    else:
-                        st.warning(f"Column '{col}' not found in existing {key_name} data")
-                        
-                elif key_name == "NCL":
-                    col = "Date we had BOTH the signed CLA and full payment"
-                    if col in current.columns:
-                        drop_mask = _mask_by_range(current, col)
-                        removed_count = drop_mask.sum()
-                        current = current.loc[~drop_mask].copy()
-                        st.info(f"Removed {removed_count} existing New Client List records in date range")
-                    else:
-                        st.warning(f"Column '{col}' not found in existing {key_name} data")
-
-            # Combine existing and new data
             combined = pd.concat([current, df_up], ignore_index=True) if not current.empty else df_up.copy()
 
             # Dedupe by dataset-specific keys
