@@ -1237,23 +1237,70 @@ def _met_counts_from_ic_dm_index(ic_df: pd.DataFrame, dm_df: pd.DataFrame, sd: d
 def _retained_counts_from_ncl(ncl_df: pd.DataFrame, sd: date, ed: date) -> Dict[str, int]:
     """
     New Client List only:
-      • Column G (index 6) in range
-      • Column F (index 5) != 'N'
-      • Column E (index 4) are initials mapping to full names; unknown initials → 'Other'
+      • Date in range (prefer header 'Date we had BOTH the signed CLA and full payment')
+      • Retained flag != 'N'
+      • Responsible Attorney (initials) → full name via INITIALS_TO_ATTORNEY
+      • Unknown initials → 'Other'
     """
-    if not isinstance(ncl_df, pd.DataFrame) or ncl_df.empty or ncl_df.shape[1] < 7:
+    if not isinstance(ncl_df, pd.DataFrame) or ncl_df.empty:
         return {name: 0 for name in CANON}
 
-    ini_col, flag_col, date_col = ncl_df.columns[4], ncl_df.columns[5], ncl_df.columns[6]
-    t = ncl_df.copy()
-    m = _between_inclusive(t[date_col], sd, ed)
-    m &= t[flag_col].astype(str).str.strip().str.upper().ne("N")
+    # Fuzzy header resolution (with explicit preferences)
+    def _norm(s: str) -> str:
+        s = str(s).lower().strip()
+        s = re.sub(r"[\s_]+", " ", s)
+        s = re.sub(r"[^a-z0-9 ]", "", s)
+        return s
 
+    cols = list(ncl_df.columns)
+    norms = {c: _norm(c) for c in cols}
+
+    # Prefer exact canonical title for date; otherwise any 'date'+'signed'+'payment'
+    prefer_date = _norm("Date we had BOTH the signed CLA and full payment")
+    date_col = None
+    for c in cols:
+        if norms[c] == prefer_date:
+            date_col = c; break
+    if date_col is None:
+        cands = [c for c in cols if all(tok in norms[c] for tok in ["date","signed","payment"])]
+        if cands:
+            cands.sort(key=lambda c: len(norms[c]))  # shortest normalized
+            date_col = cands[0]
+
+    # Responsible Attorney initials (E)
+    init_col = None
+    for c in cols:
+        if all(tok in norms[c] for tok in ["responsible","attorney"]):
+            init_col = c; break
+
+    # Retained flag (F)
+    flag_col = None
+    # prefer exact 'retained with consult (y/n)'
+    prefer_flag = _norm("Retained With Consult (Y/N)")
+    for c in cols:
+        if norms[c] == prefer_flag:
+            flag_col = c; break
+    if flag_col is None:
+        for c in cols:
+            if all(tok in norms[c] for tok in ["retained","consult"]):
+                flag_col = c; break
+
+    if not (date_col and init_col and flag_col):
+        # return zeros but show what we found in the debug expander below
+        return {name: 0 for name in CANON}
+
+    # Build mask
+    t = ncl_df.copy()
+    in_range = _between_inclusive(t[date_col], sd, ed)
+    kept = t[flag_col].astype(str).str.strip().str.upper().ne("N")
+    m = in_range & kept
+
+    # Initials → full names
     def _ini_to_name(s: str) -> str:
-        token = _re.sub(r"[^A-Z]", "", str(s).upper())
+        token = re.sub(r"[^A-Z]", "", str(s).upper())
         return INITIALS_TO_ATTORNEY.get(token, "Other") if token else "Other"
 
-    mapped = t.loc[m, ini_col].map(_ini_to_name)
+    mapped = t.loc[m, init_col].map(_ini_to_name)
     vc = mapped.value_counts(dropna=False)
     return {name: int(vc.get(name, 0)) for name in CANON}
 
