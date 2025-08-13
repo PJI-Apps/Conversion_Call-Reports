@@ -1171,32 +1171,7 @@ html_table = """
 """
 st.markdown(html_table, unsafe_allow_html=True)
 
-# ───────────────────────────────────────────────────────────────────────────────
-# Practice Area
-# ───────────────────────────────────────────────────────────────────────────────
-st.subheader("Practice Area")
 
-PRACTICE_AREAS = {
-    "Estate Planning": ["Connor Watkins", "Jennifer Fox", "Rebecca Megel"],
-    "Estate Administration": [
-        "Adam Hill", "Elias Kerby", "Elizabeth Ross", "Garrett Kizer",
-        "Kyle Grabulis", "Sarah Kravetz",
-        # NEW hires:
-        "Jamie Kliem", "Carter McClain",
-    ],
-    "Civil Litigation": ["Andrew Suddarth", "William Bang", "Bret Giaimo", "Hannah Supernor", "Laura Kouremetis", "Lukios Stefan", "William Gogoel"],
-    "Business transactional": ["Kevin Jaros"],
-}
-
-OTHER_ATTORNEYS = ["Robert Brown", "Justine Sennott", "Paul Abraham"]
-
-# --- ensure practice-area mapper exists (before we build the report) ---
-if "_practice_for" not in globals():
-    def _practice_for(name: str) -> str:
-        for pa, names in PRACTICE_AREAS.items():
-            if name in names:
-                return pa
-        return "Other"
 
 # ───────────────────────────────────────────────────────────────────────────────
 # Practice Area
@@ -1282,7 +1257,7 @@ def _to_ts(series: pd.Series) -> pd.Series:
     if not isinstance(series, pd.Series) or series.empty:
         return pd.to_datetime(pd.Series([], dtype=object))
     cleaned = series.astype(str).map(_clean_dt_text)
-    dt = pd.to_datetime(cleaned, errors="coerce", infer_datetime_format=True)
+    dt = pd.to_datetime(cleaned, errors="coerce", format="mixed")
     if dt.isna().any():
         y = dt.copy()
         for fmt in ("%m/%d/%Y %I:%M %p", "%m/%d/%Y %H:%M", "%Y-%m-%d %H:%M", "%m/%d/%Y"):
@@ -1528,7 +1503,10 @@ with st.expander("🔧 IC/DM sanity (per sheet & PA) — current window", expand
                 ic_t = df_init.copy()
                 ic_m = _between_inclusive(ic_t[ic_dtc], start_date, end_date)
                 ic_m &= ~ic_t[ic_sub].astype(str).str.strip().str.lower().eq("follow up")
-                ic_m &= _is_blank(ic_t[ic_rsn])
+                # Exclude rows where reason contains "Canceled Meeting" or "No Show"
+                ic_reason_str = ic_t[ic_rsn].astype(str).str.strip().str.lower()
+                ic_m &= ~ic_reason_str.str.contains("canceled meeting", na=False)
+                ic_m &= ~ic_reason_str.str.contains("no show", na=False)
                 ic_ep = ic_t.loc[ic_m & ic_t[ic_att].astype(str).str.strip().isin(ep_names)]
                 st.write("IC - EP attorneys in range:", ic_ep[ic_att].value_counts().to_dict())
             
@@ -1538,7 +1516,10 @@ with st.expander("🔧 IC/DM sanity (per sheet & PA) — current window", expand
                 dm_t = df_disc.copy()
                 dm_m = _between_inclusive(dm_t[dm_dtc], start_date, end_date)
                 dm_m &= ~dm_t[dm_sub].astype(str).str.strip().str.lower().eq("follow up")
-                dm_m &= _is_blank(dm_t[dm_rsn])
+                # Exclude rows where reason contains "Canceled Meeting" or "No Show"
+                dm_reason_str = dm_t[dm_rsn].astype(str).str.strip().str.lower()
+                dm_m &= ~dm_reason_str.str.contains("canceled meeting", na=False)
+                dm_m &= ~dm_reason_str.str.contains("no show", na=False)
                 dm_ep = dm_t.loc[dm_m & dm_t[dm_att].astype(str).str.strip().isin(ep_names)]
                 st.write("DM - EP attorneys in range:", dm_ep[dm_att].value_counts().to_dict())
 
@@ -1689,7 +1670,7 @@ with st.expander("🔬 Estate Planning — inclusion audit (why met != your expe
         x = x.str.replace(r"\s+at\s+"," ", regex=True).str.replace(r"\s+(ET|EDT|EST|CT|CDT|CST|MT|MDT|MST|PT|PDT)\b","", regex=True)
         x = x.str.replace(r"(\d)(am|pm)\b", r"\1 \2", regex=True)
         x = x.str.replace(r"\s+"," ", regex=True).str.strip()
-        dt = pd.to_datetime(x, errors="coerce", infer_datetime_format=True)
+        dt = pd.to_datetime(x, errors="coerce", format="mixed")
         if dt.isna().any():
             y = dt.copy()
             for fmt in ("%m/%d/%Y %I:%M %p", "%m/%d/%Y %H:%M", "%Y-%m-%d %H:%M", "%m/%d/%Y"):
