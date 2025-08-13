@@ -990,7 +990,7 @@ with row[2]:
     )
 
 week_defs = None
-sel_week_idx = 0
+sel_week_idx = 1
 if period_mode == "Week of month":
     week_defs = custom_weeks_for_month(sel_year_conv, sel_month_num)
     def _wk_label(i):
@@ -998,7 +998,7 @@ if period_mode == "Week of month":
         return f'{wk["label"]} ({sd.day}–{ed.day} {ed.strftime("%b")})'
     sel_week_idx = st.selectbox("Week of month",
                                 options=list(range(len(week_defs))),
-                                index=0, format_func=_wk_label)
+                                index=1, format_func=_wk_label)
 
 cust_cols = st.columns(2)
 custom_start = custom_end = None
