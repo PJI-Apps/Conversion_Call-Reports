@@ -1542,7 +1542,7 @@ with st.expander("🔧 Debugging & Troubleshooting", expanded=False):
                     dm_ep = dm_t.loc[dm_m & dm_t[dm_att].astype(str).str.strip().isin(ep_names)]
                     st.write("DM - EP attorneys in range:", dm_ep[dm_att].value_counts().to_dict())
 
-with st.expander("🔧 NCL retained sanity — headers & sample", expanded=False):
+    with st.expander("🔧 NCL retained sanity — headers & sample", expanded=False):
     if isinstance(df_ncl, pd.DataFrame) and not df_ncl.empty:
         st.write("NCL columns (index → name):", {i: c for i, c in enumerate(df_ncl.columns)})
         # Show which headers were picked and the first 20 included rows
@@ -1601,8 +1601,8 @@ with st.expander("🔧 NCL retained sanity — headers & sample", expanded=False
     else:
         st.write("No NCL rows loaded for the current window.")
 
-# --- Estate Planning inclusion audit (row-level) ---
-with st.expander("🔬 Estate Planning — inclusion audit (IC: L/M/G/I, DM: L/P/G/I)", expanded=False):
+    # --- Estate Planning inclusion audit (row-level) ---
+    with st.expander("🔬 Estate Planning — inclusion audit (IC: L/M/G/I, DM: L/P/G/I)", expanded=False):
     EP_NAMES = ["Connor Watkins", "Jennifer Fox", "Rebecca Megel"]
 
     def _audit_sheet(df: pd.DataFrame, att_idx: int, date_idx: int, sub_idx: int, reason_idx: int, src: str) -> pd.DataFrame:
