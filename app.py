@@ -1453,7 +1453,7 @@ def _render_three_row_card(title_name: str, met: int, kept: int, pct: float):
     rows = [
         (f"PNCs who met with {title_name}", f"{int(met)}"),
         (f"PNCs who met with {title_name} and retained", f"{int(kept)}"),
-        (f"% of PNCs who met with {title_name} and retained", f"{pct:.2f}%"),
+        (f"% of PNCs who met with {title_name} and retained", f"{int(round(pct))}%"),
     ]
     trs = "\n".join(
         f"<tr><td>{_html_escape(k)}</td><td style='text-align:right'>{_html_escape(v)}</td></tr>"
@@ -1476,14 +1476,14 @@ for pa in ["Estate Planning","Estate Administration","Civil Litigation","Busines
     sub = report.loc[report["Practice Area"] == pa].copy()
     met_sum  = int(sub["PNCs who met"].sum())
     kept_sum = int(sub["PNCs who met and retained"].sum())
-    pct_sum  = 0.0 if met_sum == 0 else round((kept_sum / met_sum) * 100.0, 2)
+    pct_sum  = 0.0 if met_sum == 0 else round((kept_sum / met_sum) * 100.0, 0)
 
     with st.expander(pa, expanded=False):
         attys = ["ALL"] + sub["Attorney_Display"].tolist()
         pick = st.selectbox(f"{pa} — choose attorney", attys, key=f"pa_pick_{pa.replace(' ','_')}")
         if pick == "ALL":
             # For ALL, calculate percentage based on practice area's total "met with" count
-            pct_all = 0.0 if met_sum == 0 else round((kept_sum / met_sum) * 100.0, 2)
+            pct_all = 0.0 if met_sum == 0 else round((kept_sum / met_sum) * 100.0, 0)
             _render_three_row_card("ALL", met_sum, kept_sum, pct_all)
         else:
             rowx = sub.loc[sub["Attorney_Display"] == pick].iloc[0]
@@ -2120,16 +2120,16 @@ if selected_intake == "ALL":
     # Create summary table with summed metrics
     all_summary_rows = [
         ("Total PNCs all intake specialists did intake", str(total_pncs_intake)),
-        ("% of total PNCs received all intake specialists did intake", f"{all_pct_total:.1f}%"),
+        ("% of total PNCs received all intake specialists did intake", f"{int(round(all_pct_total))}%"),
         ("Total PNCs who retained without consultation", str(total_retained_without)),
         ("Total PNCs who scheduled consultation", str(total_scheduled)),
-        ("% of remaining PNCs who scheduled consult", f"{all_pct_remaining_scheduled:.1f}%"),
+        ("% of remaining PNCs who scheduled consult", f"{int(round(all_pct_remaining_scheduled))}%"),
         ("Total PNCs who showed up for consultation", str(total_showed_up)),
-        ("% of PNCs who showed up for consultation", f"{all_pct_showed_up:.1f}%"),
+        ("% of PNCs who showed up for consultation", f"{int(round(all_pct_showed_up))}%"),
         ("Total PNCs retained after scheduled consultation", str(total_retained_after)),
-        ("% of PNCs who retained after scheduled consult", f"{all_pct_retained_after:.1f}%"),
+        ("% of PNCs who retained after scheduled consult", f"{int(round(all_pct_retained_after))}%"),
         ("All intake specialists' total PNCs who retained", str(total_retained)),
-        ("% of total PNCs received who retained", f"{all_pct_total_retained:.1f}%"),
+        ("% of total PNCs received who retained", f"{int(round(all_pct_total_retained))}%"),
     ]
     
     all_summary_df = pd.DataFrame(all_summary_rows, columns=["Metric", "Value"])
@@ -2144,16 +2144,16 @@ else:
     # Create row-based table like practice area section with personalized labels
     intake_rows = [
         (f"PNCs {selected_intake} did intake", str(data["PNCs did intake"])),
-        (f"% of total PNCs received {selected_intake} did intake", f"{data['% of total PNCs']:.1f}%"),
+        (f"% of total PNCs received {selected_intake} did intake", f"{int(round(data['% of total PNCs']))}%"),
         (f"PNCs who retained without consultation", str(data["Retained without consult"])),
         (f"PNCs who scheduled consultation", str(data["Scheduled consult"])),
-        (f"% of remaining PNCs who scheduled consult", f"{data['% remaining scheduled']:.1f}%"),
+        (f"% of remaining PNCs who scheduled consult", f"{int(round(data['% remaining scheduled']))}%"),
         (f"PNCs who showed up for consultation", str(data["Showed up"])),
-        (f"% of PNCs who showed up for consultation", f"{data['% showed up']:.1f}%"),
+        (f"% of PNCs who showed up for consultation", f"{int(round(data['% showed up']))}%"),
         (f"PNCs retained after scheduled consultation", str(data["Retained after consult"])),
-        (f"% of PNCs who retained after scheduled consult", f"{data['% retained after consult']:.1f}%"),
+        (f"% of PNCs who retained after scheduled consult", f"{int(round(data['% retained after consult']))}%"),
         (f"{selected_intake}'s total PNCs who retained", str(data["Total retained"])),
-        (f"% of total PNCs received who retained", f"{data['% total retained']:.1f}%"),
+        (f"% of total PNCs received who retained", f"{int(round(data['% total retained']))}%"),
     ]
     
     # Create DataFrame for display
