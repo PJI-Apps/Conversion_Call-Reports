@@ -1543,105 +1543,105 @@ with st.expander("🔧 Debugging & Troubleshooting", expanded=False):
                     st.write("DM - EP attorneys in range:", dm_ep[dm_att].value_counts().to_dict())
 
     with st.expander("🔧 NCL retained sanity — headers & sample", expanded=False):
-    if isinstance(df_ncl, pd.DataFrame) and not df_ncl.empty:
-        st.write("NCL columns (index → name):", {i: c for i, c in enumerate(df_ncl.columns)})
-        # Show which headers were picked and the first 20 included rows
-        def _norm(s): 
-            s = str(s).lower().strip(); 
-            s = _re.sub(r"[\s_]+", " ", s); 
-            s = _re.sub(r"[^a-z0-9 ]", "", s); 
-            return s
-        cols = list(df_ncl.columns); norms = {c: _norm(c) for c in cols}
-        
-        # Show what columns were found with each approach
-        prefer_date = _norm("Date we had BOTH the signed CLA and full payment")
-        picked_date = next((c for c in cols if norms[c] == prefer_date), None)
-        if picked_date is None:
-            cands = [c for c in cols if all(tok in norms[c] for tok in ["date","signed","payment"])]
-            if cands:
-                cands.sort(key=lambda c: len(norms[c])); picked_date = cands[0]
-        if picked_date is None:
-            picked_date = next((c for c in cols if "date" in norms[c]), None)
-        if picked_date is None and len(cols) > 6:
-            picked_date = cols[6]  # Column G
+        if isinstance(df_ncl, pd.DataFrame) and not df_ncl.empty:
+            st.write("NCL columns (index → name):", {i: c for i, c in enumerate(df_ncl.columns)})
+            # Show which headers were picked and the first 20 included rows
+            def _norm(s): 
+                s = str(s).lower().strip(); 
+                s = _re.sub(r"[\s_]+", " ", s); 
+                s = _re.sub(r"[^a-z0-9 ]", "", s); 
+                return s
+            cols = list(df_ncl.columns); norms = {c: _norm(c) for c in cols}
             
-        picked_init = next((c for c in cols if all(tok in norms[c] for tok in ["responsible","attorney"])), None)
-        if picked_init is None:
-            picked_init = next((c for c in cols if "attorney" in norms[c]), None)
-        if picked_init is None and len(cols) > 4:
-            picked_init = cols[4]  # Column E
-            
-        prefer_flag = _norm("Retained With Consult (Y/N)")
-        picked_flag = next((c for c in cols if norms[c] == prefer_flag), None)
-        if picked_flag is None:
-            picked_flag = next((c for c in cols if all(tok in norms[c] for tok in ["retained","consult"])), None)
-        if picked_flag is None:
-            picked_flag = next((c for c in cols if "retained" in norms[c]), None)
-        if picked_flag is None and len(cols) > 5:
-            picked_flag = cols[5]  # Column F
-            
-        st.write("Picked columns → date:", picked_date, " initials:", picked_init, " flag:", picked_flag)
-        st.write("Date range filter:", start_date, "to", end_date)
+            # Show what columns were found with each approach
+            prefer_date = _norm("Date we had BOTH the signed CLA and full payment")
+            picked_date = next((c for c in cols if norms[c] == prefer_date), None)
+            if picked_date is None:
+                cands = [c for c in cols if all(tok in norms[c] for tok in ["date","signed","payment"])]
+                if cands:
+                    cands.sort(key=lambda c: len(norms[c])); picked_date = cands[0]
+            if picked_date is None:
+                picked_date = next((c for c in cols if "date" in norms[c]), None)
+            if picked_date is None and len(cols) > 6:
+                picked_date = cols[6]  # Column G
+                
+            picked_init = next((c for c in cols if all(tok in norms[c] for tok in ["responsible","attorney"])), None)
+            if picked_init is None:
+                picked_init = next((c for c in cols if "attorney" in norms[c]), None)
+            if picked_init is None and len(cols) > 4:
+                picked_init = cols[4]  # Column E
+                
+            prefer_flag = _norm("Retained With Consult (Y/N)")
+            picked_flag = next((c for c in cols if norms[c] == prefer_flag), None)
+            if picked_flag is None:
+                picked_flag = next((c for c in cols if all(tok in norms[c] for tok in ["retained","consult"])), None)
+            if picked_flag is None:
+                picked_flag = next((c for c in cols if "retained" in norms[c]), None)
+            if picked_flag is None and len(cols) > 5:
+                picked_flag = cols[5]  # Column F
+                
+            st.write("Picked columns → date:", picked_date, " initials:", picked_init, " flag:", picked_flag)
+            st.write("Date range filter:", start_date, "to", end_date)
 
-        if picked_date and picked_init and picked_flag:
-            t = df_ncl.copy()
-            in_range = _between_inclusive(t[picked_date], start_date, end_date)
-            kept = t[picked_flag].astype(str).str.strip().str.upper().ne("N")
-            st.write("Rows in date range:", in_range.sum())
-            st.write("Rows with retained flag != 'N':", kept.sum())
-            st.write("Rows meeting both criteria:", (in_range & kept).sum())
-            
-            sample = t.loc[in_range & kept, [picked_init, picked_flag, picked_date]].head(20)
-            st.write("First 20 rows in range & kept:", sample)
-            
-            # Show some sample data from the picked columns
-            st.write("Sample data from picked columns:")
-            sample_all = t[[picked_init, picked_flag, picked_date]].head(10)
-            st.write(sample_all)
-    else:
-        st.write("No NCL rows loaded for the current window.")
+            if picked_date and picked_init and picked_flag:
+                t = df_ncl.copy()
+                in_range = _between_inclusive(t[picked_date], start_date, end_date)
+                kept = t[picked_flag].astype(str).str.strip().str.upper().ne("N")
+                st.write("Rows in date range:", in_range.sum())
+                st.write("Rows with retained flag != 'N':", kept.sum())
+                st.write("Rows meeting both criteria:", (in_range & kept).sum())
+                
+                sample = t.loc[in_range & kept, [picked_init, picked_flag, picked_date]].head(20)
+                st.write("First 20 rows in range & kept:", sample)
+                
+                # Show some sample data from the picked columns
+                st.write("Sample data from picked columns:")
+                sample_all = t[[picked_init, picked_flag, picked_date]].head(10)
+                st.write(sample_all)
+        else:
+            st.write("No NCL rows loaded for the current window.")
 
     # --- Estate Planning inclusion audit (row-level) ---
     with st.expander("🔬 Estate Planning — inclusion audit (IC: L/M/G/I, DM: L/P/G/I)", expanded=False):
-    EP_NAMES = ["Connor Watkins", "Jennifer Fox", "Rebecca Megel"]
+        EP_NAMES = ["Connor Watkins", "Jennifer Fox", "Rebecca Megel"]
 
-    def _audit_sheet(df: pd.DataFrame, att_idx: int, date_idx: int, sub_idx: int, reason_idx: int, src: str) -> pd.DataFrame:
-        if not isinstance(df, pd.DataFrame) or df.empty or df.shape[1] <= max(att_idx, date_idx, sub_idx, reason_idx):
-            return pd.DataFrame(columns=["Attorney","Date","Source","Sub Status","Reason","InRange","IsFollowUp","HasCanceledMeeting","HasNoShow","Included"])
-        att, dtc, sub, rsn = df.columns[att_idx], df.columns[date_idx], df.columns[sub_idx], df.columns[reason_idx]
-        t = df[[att, dtc, sub, rsn]].copy()
-        t.columns = ["Attorney","Date","Sub Status","Reason"]
-        t["Attorney"] = t["Attorney"].astype(str).str.strip()
-        t = t[t["Attorney"].isin(EP_NAMES)].copy()
+        def _audit_sheet(df: pd.DataFrame, att_idx: int, date_idx: int, sub_idx: int, reason_idx: int, src: str) -> pd.DataFrame:
+            if not isinstance(df, pd.DataFrame) or df.empty or df.shape[1] <= max(att_idx, date_idx, sub_idx, reason_idx):
+                return pd.DataFrame(columns=["Attorney","Date","Source","Sub Status","Reason","InRange","IsFollowUp","HasCanceledMeeting","HasNoShow","Included"])
+            att, dtc, sub, rsn = df.columns[att_idx], df.columns[date_idx], df.columns[sub_idx], df.columns[reason_idx]
+            t = df[[att, dtc, sub, rsn]].copy()
+            t.columns = ["Attorney","Date","Sub Status","Reason"]
+            t["Attorney"] = t["Attorney"].astype(str).str.strip()
+            t = t[t["Attorney"].isin(EP_NAMES)].copy()
 
-        # parse using the same helpers as main logic
-        dt = _to_ts(t["Date"])
-        t["Date"] = dt
-        t["Source"] = src
-        t["InRange"] = (dt.dt.date >= start_date) & (dt.dt.date <= end_date)
-        t["IsFollowUp"] = t["Sub Status"].astype(str).str.strip().str.lower().eq("follow up")
-        # Check for "Canceled Meeting" or "No Show" in reason
-        reason_str = t["Reason"].astype(str).str.strip().str.lower()
-        t["HasCanceledMeeting"] = reason_str.str.contains("canceled meeting", na=False)
-        t["HasNoShow"] = reason_str.str.contains("no show", na=False)
-        t["Included"] = t["InRange"] & ~t["IsFollowUp"] & ~t["HasCanceledMeeting"] & ~t["HasNoShow"]
-        return t
+            # parse using the same helpers as main logic
+            dt = _to_ts(t["Date"])
+            t["Date"] = dt
+            t["Source"] = src
+            t["InRange"] = (dt.dt.date >= start_date) & (dt.dt.date <= end_date)
+            t["IsFollowUp"] = t["Sub Status"].astype(str).str.strip().str.lower().eq("follow up")
+            # Check for "Canceled Meeting" or "No Show" in reason
+            reason_str = t["Reason"].astype(str).str.strip().str.lower()
+            t["HasCanceledMeeting"] = reason_str.str.contains("canceled meeting", na=False)
+            t["HasNoShow"] = reason_str.str.contains("no show", na=False)
+            t["Included"] = t["InRange"] & ~t["IsFollowUp"] & ~t["HasCanceledMeeting"] & ~t["HasNoShow"]
+            return t
 
-    ic_audit = _audit_sheet(df_init, 11, 12, 6, 8, "IC") if isinstance(df_init, pd.DataFrame) else pd.DataFrame()
-    dm_audit = _audit_sheet(df_disc, 11, 15, 6, 8, "DM") if isinstance(df_disc, pd.DataFrame) else pd.DataFrame()
-    ep_audit = pd.concat([ic_audit, dm_audit], ignore_index=True) if not ic_audit.empty or not dm_audit.empty else pd.DataFrame()
+        ic_audit = _audit_sheet(df_init, 11, 12, 6, 8, "IC") if isinstance(df_init, pd.DataFrame) else pd.DataFrame()
+        dm_audit = _audit_sheet(df_disc, 11, 15, 6, 8, "DM") if isinstance(df_disc, pd.DataFrame) else pd.DataFrame()
+        ep_audit = pd.concat([ic_audit, dm_audit], ignore_index=True) if not ic_audit.empty or not dm_audit.empty else pd.DataFrame()
 
-    if ep_audit.empty:
-        st.info("No Estate Planning rows found in the current window.")
-    else:
-        summary = ep_audit.groupby(["Attorney","Source"], dropna=False).agg(
-            total=("Included", "size"),
-            in_range=("InRange","sum"),
-            excluded_followup=("IsFollowUp","sum"),
-            excluded_canceled=("HasCanceledMeeting","sum"),
-            excluded_noshow=("HasNoShow","sum"),
-            included=("Included","sum"),
-        ).reset_index()
+        if ep_audit.empty:
+            st.info("No Estate Planning rows found in the current window.")
+        else:
+            summary = ep_audit.groupby(["Attorney","Source"], dropna=False).agg(
+                total=("Included", "size"),
+                in_range=("InRange","sum"),
+                excluded_followup=("IsFollowUp","sum"),
+                excluded_canceled=("HasCanceledMeeting","sum"),
+                excluded_noshow=("HasNoShow","sum"),
+                included=("Included","sum"),
+            ).reset_index()
         st.write("Estate Planning — summary by attorney & source:", summary)
         st.write("**EP totals — Included = met (IC+DM):**", int(ep_audit["Included"].sum()))
         show_cols = ["Attorney","Date","Source","Sub Status","Reason","InRange","IsFollowUp","HasCanceledMeeting","HasNoShow","Included"]
