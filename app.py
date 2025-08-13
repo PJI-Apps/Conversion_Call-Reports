@@ -1156,88 +1156,97 @@ INITIALS_TO_ATTORNEY = {
     "RB":"Robert Brown","JS":"Justine Sennott","PA":"Paul Abraham",
 }
 
-# Canonical list (in a stable order)
+# Canonical list (stable order)
 CANON = list(dict.fromkeys(sum(PRACTICE_AREAS.values(), []) + OTHER_ATTORNEYS))
 
-# --- small helpers (safe even if already defined above) ---
+# --- Robust helpers (dates & blank) ---
 import re as _re
 
-def _col_by_idx(df: pd.DataFrame, idx: int) -> Optional[str]:
-    if not isinstance(df, pd.DataFrame) or df.empty: return None
-    return df.columns[idx] if idx < df.shape[1] else None
+_BLANK_TOKENS = {"", "nan", "none", "na", "null"}
+
+def _is_blank(series: pd.Series) -> pd.Series:
+    if not isinstance(series, pd.Series):
+        return pd.Series([True])
+    s = series.astype(str)
+    return s.isna() | s.str.strip().eq("") | s.str.strip().str.lower().isin(_BLANK_TOKENS)
 
 _TZ_RE = _re.compile(r"\s+(ET|EDT|EST|CT|CDT|CST|MT|MDT|MST|PT|PDT)\b", flags=_re.I)
 
 def _clean_dt_text(x: str) -> str:
     if x is None: return ""
-    s = str(x).strip()
+    s = str(x).replace("\xa0", " ").strip()                # NBSP → space
     s = s.replace("–","-").replace(",", " ")
-    s = _re.sub(r"\s+at\s+", " ", s, flags=_re.I)       # " at " → space
-    s = _TZ_RE.sub("", s)                               # drop trailing timezone token
-    s = _re.sub(r"(\d)(am|pm)\b", r"\1 \2", s, flags=_re.I)  # "12:45pm"→"12:45 pm"
+    s = _re.sub(r"\s+at\s+", " ", s, flags=_re.I)          # " at "
+    s = _TZ_RE.sub("", s)                                  # drop trailing timezone tag
+    s = _re.sub(r"(\d)(am|pm)\b", r"\1 \2", s, flags=_re.I)# "12:45pm"→"12:45 pm"
     s = _re.sub(r"\s+", " ", s).strip()
     return s
 
 def _to_ts(series: pd.Series) -> pd.Series:
-    s = series.astype(str).map(_clean_dt_text)
-    x = pd.to_datetime(s, errors="coerce", infer_datetime_format=True)
-    if x.isna().any():
-        y = x.copy()
+    if not isinstance(series, pd.Series) or series.empty:
+        return pd.to_datetime(pd.Series([], dtype=object))
+    cleaned = series.astype(str).map(_clean_dt_text)
+    dt = pd.to_datetime(cleaned, errors="coerce", infer_datetime_format=True)
+    if dt.isna().any():
+        y = dt.copy()
         for fmt in ("%m/%d/%Y %I:%M %p", "%m/%d/%Y %H:%M", "%Y-%m-%d %H:%M", "%m/%d/%Y"):
-            mask = y.isna()
-            if not mask.any(): break
+            m = y.isna()
+            if not m.any(): break
             try:
-                y.loc[mask] = pd.to_datetime(s.loc[mask], format=fmt, errors="coerce")
+                y.loc[m] = pd.to_datetime(cleaned.loc[m], format=fmt, errors="coerce")
             except Exception:
                 pass
-        x = y
-    try: x = x.dt.tz_localize(None)
-    except Exception: pass
-    return x
+        dt = y
+    try:
+        dt = dt.dt.tz_localize(None)
+    except Exception:
+        pass
+    return dt
 
 def _between_inclusive(series: pd.Series, sd: date, ed: date) -> pd.Series:
-    x = _to_ts(series)
-    return (x >= pd.Timestamp(sd)) & (x <= pd.Timestamp(ed))
+    ts = _to_ts(series)
+    return (ts.dt.date >= sd) & (ts.dt.date <= ed)
 
-def _is_blank(series: pd.Series) -> pd.Series:
-    s = series.astype(str)
-    return series.isna() | (s.str.strip() == "") | (s.str.lower().isin(["nan","none","na","null"]))
+def _col_by_idx(df: pd.DataFrame, idx: int) -> Optional[str]:
+    if not isinstance(df, pd.DataFrame) or df.empty: return None
+    return df.columns[idx] if idx < df.shape[1] else None
 
-# ── EXACT index-based “met” counts (preferred; matches your spec) ─────────────
-def _met_counts_from_ic_dm_index(ic_df: pd.DataFrame, dm_df: pd.DataFrame, sd: date, ed: date) -> Dict[str, int]:
-    buckets = []
+# --- IC/DM “met with” (index-based per your spec) ---
+def _met_counts_from_ic_dm_index(ic_df: pd.DataFrame, dm_df: pd.DataFrame,
+                                 sd: date, ed: date) -> pd.Series:
+    out = {}
 
-    # Initial_Consultation: L=11(att), M=12(date), G=6(sub), I=8(reason)
-    if isinstance(ic_df, pd.DataFrame) and not ic_df.empty and ic_df.shape[1] >= 13:
+    # Initial_Consultation: L(11)=Lead Attorney, M(12)=IC date, G(6)=Sub Status, I(8)=Reason
+    if isinstance(ic_df, pd.DataFrame) and ic_df.shape[1] >= 13:
         att, dtc, sub, rsn = ic_df.columns[11], ic_df.columns[12], ic_df.columns[6], ic_df.columns[8]
         t = ic_df.copy()
         m = _between_inclusive(t[dtc], sd, ed)
         m &= ~t[sub].astype(str).str.strip().str.lower().eq("follow up")
-        m &= _is_blank(t[rsn])
-        buckets.append(t.loc[m, att].astype(str).str.strip())
+        m &= _is_blank(t[rsn])                        # treat NaN/“nan” etc. as blank
+        vc = t.loc[m, att].astype(str).str.strip().value_counts(dropna=False)
+        for k, v in vc.items():
+            if k:
+                out[k] = out.get(k, 0) + int(v)
 
-    # Discovery_Meeting: L=11(att), P=15(date), G=6(sub), I=8(reason)
-    if isinstance(dm_df, pd.DataFrame) and not dm_df.empty and dm_df.shape[1] >= 16:
+    # Discovery_Meeting: L(11)=Lead Attorney, P(15)=DM date, G(6)=Sub Status, I(8)=Reason
+    if isinstance(dm_df, pd.DataFrame) and dm_df.shape[1] >= 16:
         att, dtc, sub, rsn = dm_df.columns[11], dm_df.columns[15], dm_df.columns[6], dm_df.columns[8]
         t = dm_df.copy()
         m = _between_inclusive(t[dtc], sd, ed)
         m &= ~t[sub].astype(str).str.strip().str.lower().eq("follow up")
         m &= _is_blank(t[rsn])
-        buckets.append(t.loc[m, att].astype(str).str.strip())
+        vc = t.loc[m, att].astype(str).str.strip().value_counts(dropna=False)
+        for k, v in vc.items():
+            if k:
+                out[k] = out.get(k, 0) + int(v)
 
-    if not buckets:
-        return {}
+    return pd.Series(out, dtype=int)
 
-    series = pd.concat(buckets, ignore_index=True)
-    series = series[series.ne("")]
-    vc = series.value_counts(dropna=False)
-    return {name: int(vc.get(name, 0)) for name in CANON}
-
-# ── NCL “met & retained” (E,F,G) ──────────────────────────────────────────────
+# --- NCL “met & retained” (fuzzy headers but E/F/G logic) ---
 def _retained_counts_from_ncl(ncl_df: pd.DataFrame, sd: date, ed: date) -> Dict[str, int]:
     """
     New Client List only:
-      • Date in range (prefer header 'Date we had BOTH the signed CLA and full payment')
+      • Date in range (prefer 'Date we had BOTH the signed CLA and full payment')
       • Retained flag != 'N'
       • Responsible Attorney (initials) → full name via INITIALS_TO_ATTORNEY
       • Unknown initials → 'Other'
@@ -1245,70 +1254,55 @@ def _retained_counts_from_ncl(ncl_df: pd.DataFrame, sd: date, ed: date) -> Dict[
     if not isinstance(ncl_df, pd.DataFrame) or ncl_df.empty:
         return {name: 0 for name in CANON}
 
-    # Fuzzy header resolution (with explicit preferences)
     def _norm(s: str) -> str:
         s = str(s).lower().strip()
-        s = re.sub(r"[\s_]+", " ", s)
-        s = re.sub(r"[^a-z0-9 ]", "", s)
+        s = _re.sub(r"[\s_]+"," ", s)
+        s = _re.sub(r"[^a-z0-9 ]","", s)
         return s
 
     cols = list(ncl_df.columns)
     norms = {c: _norm(c) for c in cols}
 
-    # Prefer exact canonical title for date; otherwise any 'date'+'signed'+'payment'
+    # Prefer exact canonical date title; else a 'date+signed+payment' combo
     prefer_date = _norm("Date we had BOTH the signed CLA and full payment")
-    date_col = None
-    for c in cols:
-        if norms[c] == prefer_date:
-            date_col = c; break
+    date_col = next((c for c in cols if norms[c] == prefer_date), None)
     if date_col is None:
         cands = [c for c in cols if all(tok in norms[c] for tok in ["date","signed","payment"])]
         if cands:
-            cands.sort(key=lambda c: len(norms[c]))  # shortest normalized
+            cands.sort(key=lambda c: len(norms[c]))
             date_col = cands[0]
 
-    # Responsible Attorney initials (E)
-    init_col = None
-    for c in cols:
-        if all(tok in norms[c] for tok in ["responsible","attorney"]):
-            init_col = c; break
+    # Responsible Attorney (initials)
+    init_col = next((c for c in cols if all(tok in norms[c] for tok in ["responsible","attorney"])), None)
 
-    # Retained flag (F)
-    flag_col = None
-    # prefer exact 'retained with consult (y/n)'
+    # Retained flag (prefer exact)
     prefer_flag = _norm("Retained With Consult (Y/N)")
-    for c in cols:
-        if norms[c] == prefer_flag:
-            flag_col = c; break
+    flag_col = next((c for c in cols if norms[c] == prefer_flag), None)
     if flag_col is None:
-        for c in cols:
-            if all(tok in norms[c] for tok in ["retained","consult"]):
-                flag_col = c; break
+        flag_col = next((c for c in cols if all(tok in norms[c] for tok in ["retained","consult"])), None)
 
     if not (date_col and init_col and flag_col):
-        # return zeros but show what we found in the debug expander below
         return {name: 0 for name in CANON}
 
-    # Build mask
     t = ncl_df.copy()
     in_range = _between_inclusive(t[date_col], sd, ed)
     kept = t[flag_col].astype(str).str.strip().str.upper().ne("N")
     m = in_range & kept
 
-    # Initials → full names
     def _ini_to_name(s: str) -> str:
-        token = re.sub(r"[^A-Z]", "", str(s).upper())
+        token = _re.sub(r"[^A-Z]", "", str(s).upper())
         return INITIALS_TO_ATTORNEY.get(token, "Other") if token else "Other"
 
     mapped = t.loc[m, init_col].map(_ini_to_name)
     vc = mapped.value_counts(dropna=False)
     return {name: int(vc.get(name, 0)) for name in CANON}
 
-# Build counts
-met_by_attorney      = _met_counts_from_ic_dm_index(df_init, df_disc, start_date, end_date)
+# --- Build counts & report ---
+met_counts_raw = _met_counts_from_ic_dm_index(df_init, df_disc, start_date, end_date)
+met_by_attorney = {name: int(met_counts_raw.get(name, 0)) for name in CANON}
+
 retained_by_attorney = _retained_counts_from_ncl(df_ncl, start_date, end_date)
 
-# Assemble report
 report = pd.DataFrame({
     "Attorney": CANON,
     "Practice Area": [ _practice_for(a) for a in CANON ],
@@ -1322,7 +1316,7 @@ report["% of PNCs who met and retained"] = report.apply(
     axis=1
 )
 
-# Renderer (same look as before)
+# --- Renderer (same look as before) ---
 def _render_three_row_card(title_name: str, met: int, kept: int, pct: float):
     rows = [
         (f"PNCs who met with {title_name}", f"{int(met)}"),
@@ -1345,7 +1339,7 @@ def _render_three_row_card(title_name: str, met: int, kept: int, pct: float):
 </table>"""
     st.markdown(html, unsafe_allow_html=True)
 
-# Render per practice area
+# --- Render per practice area ---
 for pa in ["Estate Planning","Estate Administration","Civil Litigation","Business transactional","Other"]:
     sub = report.loc[report["Practice Area"] == pa].copy()
     met_sum  = int(sub["PNCs who met"].sum())
@@ -1366,10 +1360,91 @@ for pa in ["Estate Planning","Estate Administration","Civil Litigation","Busines
                 float(rowx["% of PNCs who met and retained"]),
             )
 
-# Optional tiny debug to help reconcile if needed
-with st.expander("🔎 Practice Area — debug snapshot", expanded=False):
-    st.write("Met (IC+DM, index-based):", met_by_attorney)
-    st.write("Retained (NCL E/F/G):", retained_by_attorney)
+# --- Concise debug snapshots ---
+with st.expander("🔧 IC/DM sanity (per sheet & PA) — current window", expanded=False):
+    ic_L = _col_by_idx(df_init, 11); ic_M = _col_by_idx(df_init, 12)
+    dm_L = _col_by_idx(df_disc, 11); dm_P = _col_by_idx(df_disc, 15)
+    st.write("IC Lead (L):", ic_L, "IC Date (M):", ic_M)
+    st.write("DM Lead (L):", dm_L, "DM Date (P):", dm_P)
+    st.write("Per-attorney MET (IC+DM index-based):", met_by_attorney, "TOTAL =", sum(met_by_attorney.values()))
+    for pa in ["Estate Planning","Estate Administration","Civil Litigation","Business transactional","Other"]:
+        names = [n for n in CANON if _practice_for(n) == pa]
+        st.write(pa, "met =", sum(met_by_attorney.get(n, 0) for n in names), "by", {n: met_by_attorney.get(n, 0) for n in names})
+
+with st.expander("🔧 NCL retained sanity — headers & sample", expanded=False):
+    if isinstance(df_ncl, pd.DataFrame) and not df_ncl.empty:
+        st.write("NCL columns (index → name):", {i: c for i, c in enumerate(df_ncl.columns)})
+        # Show which headers were picked and the first 20 included rows
+        def _norm(s): 
+            s = str(s).lower().strip(); 
+            s = _re.sub(r"[\s_]+", " ", s); 
+            s = _re.sub(r"[^a-z0-9 ]", "", s); 
+            return s
+        cols = list(df_ncl.columns); norms = {c: _norm(c) for c in cols}
+        prefer_date = _norm("Date we had BOTH the signed CLA and full payment")
+        picked_date = next((c for c in cols if norms[c] == prefer_date), None)
+        if picked_date is None:
+            cands = [c for c in cols if all(tok in norms[c] for tok in ["date","signed","payment"])]
+            if cands:
+                cands.sort(key=lambda c: len(norms[c])); picked_date = cands[0]
+        picked_init = next((c for c in cols if all(tok in norms[c] for tok in ["responsible","attorney"])), None)
+        prefer_flag = _norm("Retained With Consult (Y/N)")
+        picked_flag = next((c for c in cols if norms[c] == prefer_flag), None)
+        if picked_flag is None:
+            picked_flag = next((c for c in cols if all(tok in norms[c] for tok in ["retained","consult"])), None)
+        st.write("Picked columns → date:", picked_date, " initials:", picked_init, " flag:", picked_flag)
+
+        if picked_date and picked_init and picked_flag:
+            t = df_ncl.copy()
+            in_range = _between_inclusive(t[picked_date], start_date, end_date)
+            kept = t[picked_flag].astype(str).str.strip().str.upper().ne("N")
+            sample = t.loc[in_range & kept, [picked_init, picked_flag, picked_date]].head(20)
+            st.write("First 20 rows in range & kept:", sample)
+    else:
+        st.write("No NCL rows loaded for the current window.")
+
+# --- Estate Planning inclusion audit (row-level) ---
+with st.expander("🔬 Estate Planning — inclusion audit (IC: L/M/G/I, DM: L/P/G/I)", expanded=False):
+    EP_NAMES = ["Connor Watkins", "Jennifer Fox", "Rebecca Megel"]
+
+    def _audit_sheet(df: pd.DataFrame, att_idx: int, date_idx: int, sub_idx: int, reason_idx: int, src: str) -> pd.DataFrame:
+        if not isinstance(df, pd.DataFrame) or df.empty or df.shape[1] <= max(att_idx, date_idx, sub_idx, reason_idx):
+            return pd.DataFrame(columns=["Attorney","Date","Source","Sub Status","Reason","InRange","IsFollowUp","HasReason","Included"])
+        att, dtc, sub, rsn = df.columns[att_idx], df.columns[date_idx], df.columns[sub_idx], df.columns[reason_idx]
+        t = df[[att, dtc, sub, rsn]].copy()
+        t.columns = ["Attorney","Date","Sub Status","Reason"]
+        t["Attorney"] = t["Attorney"].astype(str).str.strip()
+        t = t[t["Attorney"].isin(EP_NAMES)].copy()
+
+        # parse using the same helpers as main logic
+        dt = _to_ts(t["Date"])
+        t["Date"] = dt
+        t["Source"] = src
+        t["InRange"] = (dt.dt.date >= start_date) & (dt.dt.date <= end_date)
+        t["IsFollowUp"] = t["Sub Status"].astype(str).str.strip().str.lower().eq("follow up")
+        t["HasReason"] = ~_is_blank(t["Reason"])
+        t["Included"] = t["InRange"] & ~t["IsFollowUp"] & ~t["HasReason"]
+        return t
+
+    ic_audit = _audit_sheet(df_init, 11, 12, 6, 8, "IC") if isinstance(df_init, pd.DataFrame) else pd.DataFrame()
+    dm_audit = _audit_sheet(df_disc, 11, 15, 6, 8, "DM") if isinstance(df_disc, pd.DataFrame) else pd.DataFrame()
+    ep_audit = pd.concat([ic_audit, dm_audit], ignore_index=True) if not ic_audit.empty or not dm_audit.empty else pd.DataFrame()
+
+    if ep_audit.empty:
+        st.info("No Estate Planning rows found in the current window.")
+    else:
+        summary = ep_audit.groupby(["Attorney","Source"], dropna=False).agg(
+            total=("Included", "size"),
+            in_range=("InRange","sum"),
+            excluded_followup=("IsFollowUp","sum"),
+            excluded_reason=("HasReason","sum"),
+            included=("Included","sum"),
+        ).reset_index()
+        st.write("Estate Planning — summary by attorney & source:", summary)
+        st.write("**EP totals — Included = met (IC+DM):**", int(ep_audit["Included"].sum()))
+        show_cols = ["Attorney","Date","Source","Sub Status","Reason","InRange","IsFollowUp","HasReason","Included"]
+        st.dataframe(ep_audit[show_cols].sort_values(["Date","Attorney"]).reset_index(drop=True),
+                     use_container_width=True)
 
 
 # ───────────────────────────────────────────────────────────────────────────────
