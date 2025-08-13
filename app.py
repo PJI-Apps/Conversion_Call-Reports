@@ -2062,6 +2062,9 @@ def _intake_total_retained(df_ncl: pd.DataFrame, specialist: str) -> int:
 intake_specialists = INTAKE_SPECIALISTS + ["Everyone Else"]
 intake_results = {}
 
+# Get total PNCs from main conversion report for percentage calculations
+total_pncs = row2  # This is the total PNCs from the main conversion report
+
 for specialist in intake_specialists:
     row1 = _intake_pncs_by_specialist(df_leads, specialist)
     row3 = _intake_retained_without_consult(df_ncl, specialist)
@@ -2071,24 +2074,24 @@ for specialist in intake_specialists:
     row10 = _intake_total_retained(df_ncl, specialist)
     
     # Calculate percentages
-    row2 = _pct(row1, row2) if row2 > 0 else 0  # % of total PNCs
-    row5 = _pct(row4, (row1 - row3)) if (row1 - row3) > 0 else 0  # % of remaining PNCs who scheduled
-    row7 = _pct(row6, row4) if row4 > 0 else 0  # % who showed up
-    row9 = _pct(row8, row4) if row4 > 0 else 0  # % retained after consult
-    row11 = _pct(row10, row1) if row1 > 0 else 0  # % of total PNCs who retained
+    row2_pct = _pct(row1, total_pncs) if total_pncs > 0 else 0  # % of total PNCs
+    row5_pct = _pct(row4, (row1 - row3)) if (row1 - row3) > 0 else 0  # % of remaining PNCs who scheduled
+    row7_pct = _pct(row6, row4) if row4 > 0 else 0  # % who showed up
+    row9_pct = _pct(row8, row4) if row4 > 0 else 0  # % retained after consult
+    row11_pct = _pct(row10, row1) if row1 > 0 else 0  # % of total PNCs who retained
     
     intake_results[specialist] = {
         "PNCs did intake": row1,
-        "% of total PNCs": row2,
+        "% of total PNCs": row2_pct,
         "Retained without consult": row3,
         "Scheduled consult": row4,
-        "% remaining scheduled": row5,
+        "% remaining scheduled": row5_pct,
         "Showed up": row6,
-        "% showed up": row7,
+        "% showed up": row7_pct,
         "Retained after consult": row8,
-        "% retained after consult": row9,
+        "% retained after consult": row9_pct,
         "Total retained": row10,
-        "% total retained": row11
+        "% total retained": row11_pct
     }
 
 # --- Render intake report ---
@@ -2116,13 +2119,13 @@ if selected_intake == "ALL":
     st.dataframe(summary_df, use_container_width=True)
     
 else:
-    # Show detailed metrics for selected specialist
+    # Show detailed metrics for selected specialist in row format like practice area
     st.subheader(f"Intake Metrics - {selected_intake}")
     
     data = intake_results[selected_intake]
     
-    # Create KPI table
-    intake_kpi_rows = [
+    # Create row-based table like practice area section
+    intake_rows = [
         ("PNCs did intake", data["PNCs did intake"]),
         ("% of total PNCs received", f"{data['% of total PNCs']:.1f}%"),
         ("PNCs who retained without consultation", data["Retained without consult"]),
@@ -2138,7 +2141,7 @@ else:
     
     intake_table_rows = "\n".join(
         f"<tr><td>{_html_escape(k)}</td><td style='text-align:right'>{_html_escape(v)}</td></tr>"
-        for k, v in intake_kpi_rows
+        for k, v in intake_rows
     )
     
     intake_html_table = """
