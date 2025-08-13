@@ -218,7 +218,7 @@ def _read_ws_cached(sheet_url: str, tab_title: str, ver: int) -> pd.DataFrame:
     for c in df.columns:
         cl = c.lower()
         if "date" in cl or "with pji law" in cl or "batch" in cl:
-            df[c] = pd.to_datetime(df[c].map(_clean_datestr), errors="coerce")
+            df[c] = pd.to_datetime(df[c].map(_clean_datestr), errors="coerce", format="mixed")
     return df.dropna(how="all").fillna("")
 
 def _read_ws_by_name(logical_key: str) -> pd.DataFrame:
