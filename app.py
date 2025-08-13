@@ -2099,24 +2099,29 @@ intake_specialists_display = ["ALL"] + intake_specialists
 selected_intake = st.selectbox("Select Intake Specialist", intake_specialists_display, key="intake_specialist_pick")
 
 if selected_intake == "ALL":
-    # Show summary for all specialists
+    # Show summary for all specialists in row format
     st.subheader("Intake Summary - All Specialists")
     
-    # Create summary table
-    summary_data = []
+    # Create summary table with all metrics for each specialist
+    all_summary_data = []
     for specialist in intake_specialists:
         data = intake_results[specialist]
-        summary_data.append({
-            "Intake Specialist": specialist,
-            "PNCs": data["PNCs did intake"],
-            "Scheduled": data["Scheduled consult"],
-            "Showed Up": data["Showed up"],
-            "Total Retained": data["Total retained"],
-            "Retention Rate": f"{data['% total retained']:.1f}%"
-        })
+        all_summary_data.extend([
+            (f"{specialist} - PNCs did intake", data["PNCs did intake"]),
+            (f"{specialist} - % of total PNCs received", f"{data['% of total PNCs']:.1f}%"),
+            (f"{specialist} - PNCs who retained without consultation", data["Retained without consult"]),
+            (f"{specialist} - PNCs who scheduled consultation", data["Scheduled consult"]),
+            (f"{specialist} - % of remaining PNCs who scheduled consult", f"{data['% remaining scheduled']:.1f}%"),
+            (f"{specialist} - PNCs who showed up for consultation", data["Showed up"]),
+            (f"{specialist} - % of PNCs who showed up for consultation", f"{data['% showed up']:.1f}%"),
+            (f"{specialist} - PNCs retained after scheduled consultation", data["Retained after consult"]),
+            (f"{specialist} - % of PNCs who retained after scheduled consult", f"{data['% retained after consult']:.1f}%"),
+            (f"{specialist} - Total PNCs who retained", data["Total retained"]),
+            (f"{specialist} - % of total PNCs received who retained", f"{data['% total retained']:.1f}%"),
+        ])
     
-    summary_df = pd.DataFrame(summary_data)
-    st.dataframe(summary_df, use_container_width=True)
+    summary_df = pd.DataFrame(all_summary_data, columns=["Metric", "Value"])
+    st.dataframe(summary_df, use_container_width=True, hide_index=True)
     
 else:
     # Show detailed metrics for selected specialist in row format like practice area
