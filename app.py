@@ -563,8 +563,19 @@ def custom_weeks_for_month(year: int, month: int):
 def _mask_by_range_dates(df: pd.DataFrame, date_col: str, start: date, end: date) -> pd.Series:
     if df is None or df.empty or date_col not in df.columns:
         return pd.Series([False] * (0 if df is None else len(df)))
-    # Handle NaT values properly by using the same logic as _between_inclusive
-    ts = pd.to_datetime(df[date_col], errors="coerce")
+    # Use robust date parsing with format specification to avoid warnings
+    ts = pd.to_datetime(df[date_col], errors="coerce", format="mixed")
+    if ts.isna().any():
+        y = ts.copy()
+        for fmt in ("%m/%d/%Y %I:%M %p", "%m/%d/%Y %H:%M", "%Y-%m-%d %H:%M", "%m/%d/%Y"):
+            m = y.isna()
+            if not m.any(): break
+            try:
+                y.loc[m] = pd.to_datetime(df[date_col].loc[m], format=fmt, errors="coerce")
+            except Exception:
+                pass
+        ts = y
+    # Handle NaT values properly
     valid_dates = ts.notna()
     in_range = pd.Series([False] * len(df), index=df.index)
     if valid_dates.any():
