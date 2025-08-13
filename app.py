@@ -2099,29 +2099,41 @@ intake_specialists_display = ["ALL"] + intake_specialists
 selected_intake = st.selectbox("Select Intake Specialist", intake_specialists_display, key="intake_specialist_pick")
 
 if selected_intake == "ALL":
-    # Show summary for all specialists in row format
-    st.subheader("Intake Summary - All Specialists")
+    # Show summary for all specialists (sum of all metrics)
+    st.subheader("Intake Summary - All Specialists Combined")
     
-    # Create summary table with all metrics for each specialist
-    all_summary_data = []
-    for specialist in intake_specialists:
-        data = intake_results[specialist]
-        all_summary_data.extend([
-            (f"{specialist} - PNCs did intake", data["PNCs did intake"]),
-            (f"{specialist} - % of total PNCs received", f"{data['% of total PNCs']:.1f}%"),
-            (f"{specialist} - PNCs who retained without consultation", data["Retained without consult"]),
-            (f"{specialist} - PNCs who scheduled consultation", data["Scheduled consult"]),
-            (f"{specialist} - % of remaining PNCs who scheduled consult", f"{data['% remaining scheduled']:.1f}%"),
-            (f"{specialist} - PNCs who showed up for consultation", data["Showed up"]),
-            (f"{specialist} - % of PNCs who showed up for consultation", f"{data['% showed up']:.1f}%"),
-            (f"{specialist} - PNCs retained after scheduled consultation", data["Retained after consult"]),
-            (f"{specialist} - % of PNCs who retained after scheduled consult", f"{data['% retained after consult']:.1f}%"),
-            (f"{specialist} - Total PNCs who retained", data["Total retained"]),
-            (f"{specialist} - % of total PNCs received who retained", f"{data['% total retained']:.1f}%"),
-        ])
+    # Calculate sums across all specialists
+    total_pncs_intake = sum(data["PNCs did intake"] for data in intake_results.values())
+    total_retained_without = sum(data["Retained without consult"] for data in intake_results.values())
+    total_scheduled = sum(data["Scheduled consult"] for data in intake_results.values())
+    total_showed_up = sum(data["Showed up"] for data in intake_results.values())
+    total_retained_after = sum(data["Retained after consult"] for data in intake_results.values())
+    total_retained = sum(data["Total retained"] for data in intake_results.values())
     
-    summary_df = pd.DataFrame(all_summary_data, columns=["Metric", "Value"])
-    st.dataframe(summary_df, use_container_width=True, hide_index=True)
+    # Calculate percentages for ALL
+    all_pct_total = _pct(total_pncs_intake, total_pncs) if total_pncs > 0 else 0
+    all_pct_remaining_scheduled = _pct(total_scheduled, (total_pncs_intake - total_retained_without)) if (total_pncs_intake - total_retained_without) > 0 else 0
+    all_pct_showed_up = _pct(total_showed_up, total_scheduled) if total_scheduled > 0 else 0
+    all_pct_retained_after = _pct(total_retained_after, total_scheduled) if total_scheduled > 0 else 0
+    all_pct_total_retained = _pct(total_retained, total_pncs_intake) if total_pncs_intake > 0 else 0
+    
+    # Create summary table with summed metrics
+    all_summary_rows = [
+        ("PNCs did intake", total_pncs_intake),
+        ("% of total PNCs received", f"{all_pct_total:.1f}%"),
+        ("PNCs who retained without consultation", total_retained_without),
+        ("PNCs who scheduled consultation", total_scheduled),
+        ("% of remaining PNCs who scheduled consult", f"{all_pct_remaining_scheduled:.1f}%"),
+        ("PNCs who showed up for consultation", total_showed_up),
+        ("% of PNCs who showed up for consultation", f"{all_pct_showed_up:.1f}%"),
+        ("PNCs retained after scheduled consultation", total_retained_after),
+        ("% of PNCs who retained after scheduled consult", f"{all_pct_retained_after:.1f}%"),
+        ("Total PNCs who retained", total_retained),
+        ("% of total PNCs received who retained", f"{all_pct_total_retained:.1f}%"),
+    ]
+    
+    all_summary_df = pd.DataFrame(all_summary_rows, columns=["Metric", "Value"])
+    st.dataframe(all_summary_df, use_container_width=True, hide_index=True)
     
 else:
     # Show detailed metrics for selected specialist in row format like practice area
