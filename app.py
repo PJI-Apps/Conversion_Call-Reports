@@ -99,49 +99,98 @@ if "gs_ver" not in st.session_state:
 
 @st.cache_resource(show_spinner=False)
 def _gsheet_client_cached():
+    import gspread
+    from google.oauth2.service_account import Credentials
+    sa = st.secrets.get("gcp_service_account", None)
+    if not sa:
+        raw = st.secrets.get("gcp_service_account_json", None)
+        if raw: sa = json.loads(raw)
+    ms = st.secrets.get("master_store", None)
+    if not sa or not ms or "sheet_url" not in ms:
+        return None, None
+    if "client_email" not in sa:
+        raise ValueError("Service account object missing 'client_email'")
+    scopes = ["https://www.googleapis.com/auth/spreadsheets"]
+    creds = Credentials.from_service_account_info(sa, scopes=scopes)
+    gc = gspread.authorize(creds)
+    sh = gc.open_by_url(ms["sheet_url"])
+    return gc, sh
+
+def _gsheet_client():
     try:
-        import gspread
-        from google.oauth2.service_account import Credentials
-        
-        sa = st.secrets["gcp_service_account"]
-        scopes = [
-            "https://www.googleapis.com/auth/spreadsheets",
-            "https://www.googleapis.com/auth/drive"
-        ]
-        
-        creds = Credentials.from_service_account_info(sa, scopes=scopes)
-        gc = gspread.authorize(creds)
-        return gc, st.secrets["gsheet_url"]
+        return _gsheet_client_cached()
     except Exception as e:
-        st.error(f"Google Sheets connection failed: {e}")
+        st.warning(f"Master store unavailable: {e}")
         return None, None
 
-GC, GSHEET = _gsheet_client_cached()
+GC, GSHEET = _gsheet_client()
 
-def _ws(tab_name: str):
-    if not GC or not GSHEET:
+def _ws(title: str):
+    """Idempotent, race-safe worksheet getter/creator.
+
+    Guarantees:
+      • If a worksheet with `title` already exists, returns it without error.
+      • If it does not exist, creates it once and returns it.
+      • Uses fallbacks in TAB_FALLBACKS when present.
+    """
+    if GSHEET is None:
         return None
-    try:
-        sheet = GC.open_by_url(GSHEET)
+
+    import time
+    from gspread.exceptions import APIError, WorksheetNotFound
+
+    # 1) Fast path: try fetching a few times (transient errors happen)
+    for delay in (0.0, 0.6, 1.2):
         try:
-            return sheet.worksheet(tab_name)
-        except gspread.WorksheetNotFound:
-            # Try fallback names
-            fallbacks = TAB_FALLBACKS.get(tab_name, [])
-            for fallback in fallbacks:
-                try:
-                    return sheet.worksheet(fallback)
-                except gspread.WorksheetNotFound:
-                    continue
-            # Create if not found
+            if delay:
+                time.sleep(delay)
+            return GSHEET.worksheet(title)
+        except WorksheetNotFound:
+            # Double-check via full listing to avoid stale lookup cache
             try:
-                return sheet.add_worksheet(title=tab_name, rows=1000, cols=50)
-            except Exception as e:
-                st.error(f"Could not access/create worksheet '{tab_name}'. Please check permissions and tab names.")
-                return None
-    except Exception as e:
-        st.error(f"Could not access Google Sheet: {e}")
-        return None
+                existing_titles = {ws.title for ws in GSHEET.worksheets()}
+                if title in existing_titles:
+                    return GSHEET.worksheet(title)
+            except Exception:
+                pass
+            break  # not found after double-check; move on to fallbacks/create
+        except APIError:
+            # e.g., rate limit/5xx; retry
+            continue
+        except Exception:
+            continue
+
+    # 2) Fallback titles (legacy tab names)
+    for fb in TAB_FALLBACKS.get(title, []):
+        try:
+            return GSHEET.worksheet(fb)
+        except Exception:
+            continue
+
+    # 3) Create only if truly absent; treat ALREADY_EXISTS as success
+    try:
+        GSHEET.add_worksheet(title=title, rows=2000, cols=40)
+        return GSHEET.worksheet(title)
+    except APIError as e:
+        # If another writer created it milliseconds before us, Google returns ALREADY_EXISTS.
+        if "already exists" in str(e).lower():
+            try:
+                return GSHEET.worksheet(title)
+            except Exception:
+                pass
+        # Some APIErrors are retryable; try one last fetch before failing silently
+        try:
+            return GSHEET.worksheet(title)
+        except Exception:
+            pass
+    except Exception:
+        try:
+            return GSHEET.worksheet(title)
+        except Exception:
+            pass
+
+    st.error(f"Could not access/create worksheet '{title}'. Please check permissions and tab names.")
+    return None
 
 @st.cache_data(ttl=300, show_spinner=False)
 def _read_ws_cached(tab_name: str):
