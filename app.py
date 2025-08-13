@@ -1401,12 +1401,12 @@ def _retained_counts_from_ncl_fuzzy(ncl_df: pd.DataFrame, sd, ed) -> dict:
 
 # ---------- Build counts + report safely ----------
 try:
-def _met_counts_from_ic_dm_fuzzy(ic_df: pd.DataFrame, dm_df: pd.DataFrame, sd, ed) -> dict:
-    """Count 'PNCs who met' per attorney from IC+DM with fuzzy columns + robust dates.
-       Now explicitly avoids DM *Rescheduled* column, and hard-fallbacks to index P (15)."""
-    buckets = []
-    global _last_ic_dm_debug
-    _last_ic_dm_debug = {}
+    def _met_counts_from_ic_dm_fuzzy(ic_df: pd.DataFrame, dm_df: pd.DataFrame, sd, ed) -> dict:
+        """Count 'PNCs who met' per attorney from IC+DM with fuzzy columns + robust dates.
+           Now explicitly avoids DM *Rescheduled* column, and hard-fallbacks to index P (15)."""
+        buckets = []
+        global _last_ic_dm_debug
+        _last_ic_dm_debug = {}
 
     def _one(df, source, date_patterns, att_patterns, prefer_exact=None, avoid_resched=False, hard_fallback_idx=None):
         # attorney and date columns
