@@ -963,11 +963,9 @@ with st.expander("📞 Calls Report", expanded=False):
             st.plotly_chart(fig3, use_container_width=True)
 
 # ───────────────────────────────────────────────────────────────────────────────
-# 📊 Conversion Report
+# 📊 Firm Conversion Report
 # ───────────────────────────────────────────────────────────────────────────────
 st.markdown("---")
-st.header("📊 Conversion Report")
-
 st.header("📊 Firm Conversion Report")
 
 with st.expander("📅 Filter", expanded=False):
@@ -1211,8 +1209,7 @@ html_table = """
 with st.expander("📊 Summary", expanded=False):
     st.markdown(html_table, unsafe_allow_html=True)
 
-with st.expander("📊 Practice Area", expanded=False):
-    st.subheader("Practice Area")
+st.header("📊 Practice Area")
 
 # --- Roster & display overrides ---
 PRACTICE_AREAS = {
