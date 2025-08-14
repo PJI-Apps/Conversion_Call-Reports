@@ -2463,16 +2463,16 @@ st.markdown("---")
 st.header("🔧 Debugging & Troubleshooting")
 
 with st.expander("Debugging & Troubleshooting", expanded=False):
-with st.expander("🔧 IC/DM sanity (per sheet & PA) — current window", expanded=False):
-    ic_L = _col_by_idx(df_init, 11); ic_M = _col_by_idx(df_init, 12)
-    dm_L = _col_by_idx(df_disc, 11); dm_P = _col_by_idx(df_disc, 15)
-    st.write("IC Lead (L):", ic_L, "IC Date (M):", ic_M)
-    st.write("DM Lead (L):", dm_L, "DM Date (P):", dm_P)
+    with st.expander("🔧 IC/DM sanity (per sheet & PA) — current window", expanded=False):
+        ic_L = _col_by_idx(df_init, 11); ic_M = _col_by_idx(df_init, 12)
+        dm_L = _col_by_idx(df_disc, 11); dm_P = _col_by_idx(df_disc, 15)
+        st.write("IC Lead (L):", ic_L, "IC Date (M):", ic_M)
+        st.write("DM Lead (L):", dm_L, "DM Date (P):", dm_P)
         st.write("Date range filter:", start_date, "to", end_date)
         st.write("Raw met counts from function:", met_counts_raw)
-    st.write("Per-attorney MET (IC+DM index-based):", met_by_attorney, "TOTAL =", sum(met_by_attorney.values()))
-    for pa in ["Estate Planning","Estate Administration","Civil Litigation","Business transactional","Other"]:
-        names = [n for n in CANON if _practice_for(n) == pa]
+        st.write("Per-attorney MET (IC+DM index-based):", met_by_attorney, "TOTAL =", sum(met_by_attorney.values()))
+        for pa in ["Estate Planning","Estate Administration","Civil Litigation","Business transactional","Other"]:
+            names = [n for n in CANON if _practice_for(n) == pa]
             pa_total = sum(met_by_attorney.get(n, 0) for n in names)
             st.write(pa, "met =", pa_total, "by", {n: met_by_attorney.get(n, 0) for n in names})
             
@@ -2517,8 +2517,8 @@ with st.expander("🔧 NCL retained sanity — headers & sample", expanded=False
             s = _re.sub(r"[^a-z0-9 ]", "", s); 
             return s
         cols = list(df_ncl.columns); norms = {c: _norm(c) for c in cols}
-            
-            # Show what columns were found with each approach
+        
+        # Show what columns were found with each approach
         prefer_date = _norm("Date we had BOTH the signed CLA and full payment")
         picked_date = next((c for c in cols if norms[c] == prefer_date), None)
         if picked_date is None:
@@ -2531,10 +2531,10 @@ with st.expander("🔧 NCL retained sanity — headers & sample", expanded=False
                 picked_date = cols[6]  # Column G
                 
         picked_init = next((c for c in cols if all(tok in norms[c] for tok in ["responsible","attorney"])), None)
-            if picked_init is None:
-                picked_init = next((c for c in cols if "attorney" in norms[c]), None)
-            if picked_init is None and len(cols) > 4:
-                picked_init = cols[4]  # Column E
+        if picked_init is None:
+            picked_init = next((c for c in cols if "attorney" in norms[c]), None)
+        if picked_init is None and len(cols) > 4:
+            picked_init = cols[4]  # Column E
                 
         prefer_flag = _norm("Retained With Consult (Y/N)")
         picked_flag = next((c for c in cols if norms[c] == prefer_flag), None)
@@ -2546,23 +2546,23 @@ with st.expander("🔧 NCL retained sanity — headers & sample", expanded=False
                 picked_flag = cols[5]  # Column F
                 
         st.write("Picked columns → date:", picked_date, " initials:", picked_init, " flag:", picked_flag)
-            st.write("Date range filter:", start_date, "to", end_date)
+        st.write("Date range filter:", start_date, "to", end_date)
 
         if picked_date and picked_init and picked_flag:
             t = df_ncl.copy()
             in_range = _between_inclusive(t[picked_date], start_date, end_date)
             kept = t[picked_flag].astype(str).str.strip().str.upper().ne("N")
-                st.write("Rows in date range:", in_range.sum())
-                st.write("Rows with retained flag != 'N':", kept.sum())
-                st.write("Rows meeting both criteria:", (in_range & kept).sum())
+            st.write("Rows in date range:", in_range.sum())
+            st.write("Rows with retained flag != 'N':", kept.sum())
+            st.write("Rows meeting both criteria:", (in_range & kept).sum())
                 
             sample = t.loc[in_range & kept, [picked_init, picked_flag, picked_date]].head(20)
             st.write("First 20 rows in range & kept:", sample)
-                
-                # Show some sample data from the picked columns
-                st.write("Sample data from picked columns:")
-                sample_all = t[[picked_init, picked_flag, picked_date]].head(10)
-                st.write(sample_all)
+            
+            # Show some sample data from the picked columns
+            st.write("Sample data from picked columns:")
+            sample_all = t[[picked_init, picked_flag, picked_date]].head(10)
+            st.write(sample_all)
     else:
         st.write("No NCL rows loaded for the current window.")
 
@@ -2572,7 +2572,7 @@ with st.expander("🔬 Estate Planning — inclusion audit (IC: L/M/G/I, DM: L/P
 
     def _audit_sheet(df: pd.DataFrame, att_idx: int, date_idx: int, sub_idx: int, reason_idx: int, src: str) -> pd.DataFrame:
         if not isinstance(df, pd.DataFrame) or df.empty or df.shape[1] <= max(att_idx, date_idx, sub_idx, reason_idx):
-                return pd.DataFrame(columns=["Attorney","Date","Source","Sub Status","Reason","InRange","IsFollowUp","HasCanceledMeeting","HasNoShow","Included"])
+            return pd.DataFrame(columns=["Attorney","Date","Source","Sub Status","Reason","InRange","IsFollowUp","HasCanceledMeeting","HasNoShow","Included"])
         att, dtc, sub, rsn = df.columns[att_idx], df.columns[date_idx], df.columns[sub_idx], df.columns[reason_idx]
         t = df[[att, dtc, sub, rsn]].copy()
         t.columns = ["Attorney","Date","Sub Status","Reason"]
@@ -2585,11 +2585,11 @@ with st.expander("🔬 Estate Planning — inclusion audit (IC: L/M/G/I, DM: L/P
         t["Source"] = src
         t["InRange"] = (dt.dt.date >= start_date) & (dt.dt.date <= end_date)
         t["IsFollowUp"] = t["Sub Status"].astype(str).str.strip().str.lower().eq("follow up")
-            # Check for "Canceled Meeting" or "No Show" in reason
-            reason_str = t["Reason"].astype(str).str.strip().str.lower()
-            t["HasCanceledMeeting"] = reason_str.str.contains("canceled meeting", na=False)
-            t["HasNoShow"] = reason_str.str.contains("no show", na=False)
-            t["Included"] = t["InRange"] & ~t["IsFollowUp"] & ~t["HasCanceledMeeting"] & ~t["HasNoShow"]
+        # Check for "Canceled Meeting" or "No Show" in reason
+        reason_str = t["Reason"].astype(str).str.strip().str.lower()
+        t["HasCanceledMeeting"] = reason_str.str.contains("canceled meeting", na=False)
+        t["HasNoShow"] = reason_str.str.contains("no show", na=False)
+        t["Included"] = t["InRange"] & ~t["IsFollowUp"] & ~t["HasCanceledMeeting"] & ~t["HasNoShow"]
         return t
 
     ic_audit = _audit_sheet(df_init, 11, 12, 6, 8, "IC") if isinstance(df_init, pd.DataFrame) else pd.DataFrame()
@@ -2598,25 +2598,25 @@ with st.expander("🔬 Estate Planning — inclusion audit (IC: L/M/G/I, DM: L/P
 
     if ep_audit.empty:
         st.info("No Estate Planning rows found in the current window.")
-            summary = pd.DataFrame()
+        summary = pd.DataFrame()
     else:
         summary = ep_audit.groupby(["Attorney","Source"], dropna=False).agg(
             total=("Included", "size"),
             in_range=("InRange","sum"),
             excluded_followup=("IsFollowUp","sum"),
-                excluded_canceled=("HasCanceledMeeting","sum"),
-                excluded_noshow=("HasNoShow","sum"),
+            excluded_canceled=("HasCanceledMeeting","sum"),
+            excluded_noshow=("HasNoShow","sum"),
             included=("Included","sum"),
         ).reset_index()
         
         if not summary.empty:
-        st.write("Estate Planning — summary by attorney & source:", summary)
+            st.write("Estate Planning — summary by attorney & source:", summary)
         
         if not ep_audit.empty and "Included" in ep_audit.columns:
-        st.write("**EP totals — Included = met (IC+DM):**", int(ep_audit["Included"].sum()))
+            st.write("**EP totals — Included = met (IC+DM):**", int(ep_audit["Included"].sum()))
             show_cols = ["Attorney","Date","Source","Sub Status","Reason","InRange","IsFollowUp","HasCanceledMeeting","HasNoShow","Included"]
-        st.dataframe(ep_audit[show_cols].sort_values(["Date","Attorney"]).reset_index(drop=True),
-                     use_container_width=True)
+            st.dataframe(ep_audit[show_cols].sort_values(["Date","Attorney"]).reset_index(drop=True),
+                         use_container_width=True)
         else:
             st.info("No Estate Planning data available for the selected date range.")
 
@@ -2642,7 +2642,7 @@ with st.expander("🔬 Estate Planning — inclusion audit (why met != your expe
 
     def _audit_sheet(df: pd.DataFrame, att_idx: int, date_idx: int, sub_idx: int, reason_idx: int, src: str) -> pd.DataFrame:
         if not isinstance(df, pd.DataFrame) or df.empty or df.shape[1] <= max(att_idx, date_idx, sub_idx, reason_idx):
-                return pd.DataFrame(columns=["Attorney","Date","Source","Sub Status","Reason","InRange","IsFollowUp","HasCanceledMeeting","HasNoShow","Included"])
+            return pd.DataFrame(columns=["Attorney","Date","Source","Sub Status","Reason","InRange","IsFollowUp","HasCanceledMeeting","HasNoShow","Included"])
         att, dtc, sub, rsn = df.columns[att_idx], df.columns[date_idx], df.columns[sub_idx], df.columns[reason_idx]
         t = df[[att, dtc, sub, rsn]].copy()
         t.columns = ["Attorney","Date","Sub Status","Reason"]
@@ -2655,7 +2655,7 @@ with st.expander("🔬 Estate Planning — inclusion audit (why met != your expe
         x = x.str.replace(r"\s+at\s+"," ", regex=True).str.replace(r"\s+(ET|EDT|EST|CT|CDT|CST|MT|MDT|MST|PT|PDT)\b","", regex=True)
         x = x.str.replace(r"(\d)(am|pm)\b", r"\1 \2", regex=True)
         x = x.str.replace(r"\s+"," ", regex=True).str.strip()
-            dt = pd.to_datetime(x, errors="coerce", format="mixed")
+        dt = pd.to_datetime(x, errors="coerce", format="mixed")
         if dt.isna().any():
             y = dt.copy()
             for fmt in ("%m/%d/%Y %I:%M %p", "%m/%d/%Y %H:%M", "%Y-%m-%d %H:%M", "%m/%d/%Y"):
@@ -2674,12 +2674,12 @@ with st.expander("🔬 Estate Planning — inclusion audit (why met != your expe
         t["InRange"] = (t["Date"] >= pd.Timestamp(start_date)) & (t["Date"] <= pd.Timestamp(end_date))
         t["IsFollowUp"] = t["Sub Status"].astype(str).str.strip().str.lower().eq("follow up")
 
-            # Check for "Canceled Meeting" or "No Show" in reason
-            reason_str = t["Reason"].astype(str).str.strip().str.lower()
-            t["HasCanceledMeeting"] = reason_str.str.contains("canceled meeting", na=False)
-            t["HasNoShow"] = reason_str.str.contains("no show", na=False)
+        # Check for "Canceled Meeting" or "No Show" in reason
+        reason_str = t["Reason"].astype(str).str.strip().str.lower()
+        t["HasCanceledMeeting"] = reason_str.str.contains("canceled meeting", na=False)
+        t["HasNoShow"] = reason_str.str.contains("no show", na=False)
 
-            t["Included"] = t["InRange"] & ~t["IsFollowUp"] & ~t["HasCanceledMeeting"] & ~t["HasNoShow"]
+        t["Included"] = t["InRange"] & ~t["IsFollowUp"] & ~t["HasCanceledMeeting"] & ~t["HasNoShow"]
         return t
 
     # IC: L=11 (att), M=12 (date), G=6 (sub), I=8 (reason)
@@ -2697,8 +2697,8 @@ with st.expander("🔬 Estate Planning — inclusion audit (why met != your expe
             total=("Included", "size"),
             in_range=("InRange","sum"),
             excluded_followup=("IsFollowUp","sum"),
-                excluded_canceled=("HasCanceledMeeting","sum"),
-                excluded_noshow=("HasNoShow","sum"),
+            excluded_canceled=("HasCanceledMeeting","sum"),
+            excluded_noshow=("HasNoShow","sum"),
             included=("Included","sum"),
         ).reset_index()
         st.write("Estate Planning — summary by attorney & source:", summary)
@@ -2708,7 +2708,7 @@ with st.expander("🔬 Estate Planning — inclusion audit (why met != your expe
         st.caption("If your expected 23 ≠ Included total, the row-level table below shows each excluded row and why.")
 
         # Row-level view (you can filter in the UI)
-            show_cols = ["Attorney","Date","Source","Sub Status","Reason","InRange","IsFollowUp","HasCanceledMeeting","HasNoShow","Included"]
+        show_cols = ["Attorney","Date","Source","Sub Status","Reason","InRange","IsFollowUp","HasCanceledMeeting","HasNoShow","Included"]
         st.dataframe(ep_audit[show_cols].sort_values(["Date","Attorney"]).reset_index(drop=True), use_container_width=True)
 
 with st.expander("ℹ️ Logs (tech details)", expanded=False):
