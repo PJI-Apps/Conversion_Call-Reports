@@ -903,8 +903,8 @@ with st.expander("🧾 Data Upload & Management", expanded=st.session_state.get(
     
     with col2:
         if st.button("🔄 Allow Re-upload", use_container_width=True):
-        st.session_state.get("hashes_calls", set()).clear()
-        st.session_state.get("hashes_conv", set()).clear()
+            st.session_state.get("hashes_calls", set()).clear()
+            st.session_state.get("hashes_conv", set()).clear()
             st.success("Re-upload enabled - you can now upload the same files")
     
     with col3:
