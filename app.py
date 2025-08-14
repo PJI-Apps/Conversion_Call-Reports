@@ -903,8 +903,8 @@ with st.expander("🧾 Data Upload & Management", expanded=st.session_state.get(
     
     with col2:
         if st.button("🔄 Allow Re-upload", use_container_width=True):
-            st.session_state.get("hashes_calls", set()).clear()
-            st.session_state.get("hashes_conv", set()).clear()
+        st.session_state.get("hashes_calls", set()).clear()
+        st.session_state.get("hashes_conv", set()).clear()
             st.success("Re-upload enabled - you can now upload the same files")
     
     with col3:
@@ -986,7 +986,7 @@ with st.expander("🧾 Data Upload & Management", expanded=st.session_state.get(
             batch_id = st.session_state["current_batch_id"]
             
             # Check if this batch already exists
-            existing = _read_ws_by_name("CALLS")
+                existing = _read_ws_by_name("CALLS")
             batch_exists = False
             if isinstance(existing, pd.DataFrame) and not existing.empty and "__batch_id" in existing.columns:
                 batch_exists = existing["__batch_id"].eq(batch_id).any()
@@ -1010,8 +1010,8 @@ with st.expander("🧾 Data Upload & Management", expanded=st.session_state.get(
                     st.error("Please upload the correct ZoomUS calls export file with columns like 'Name', 'Total Calls', 'Completed Calls', etc.")
                     st.caption(f"Detected conversion report headers: {', '.join([col for col in raw.columns if col in conversion_indicators])}")
                 else:
-                    processed = process_calls_csv(raw, calls_period_key)
-                    processed_clean = processed[CALLS_MASTER_COLS].copy()
+                processed = process_calls_csv(raw, calls_period_key)
+                processed_clean = processed[CALLS_MASTER_COLS].copy()
                     
                     # Add batch metadata
                     processed_clean = add_batch_metadata(
@@ -1022,29 +1022,29 @@ with st.expander("🧾 Data Upload & Management", expanded=st.session_state.get(
                         upload_end
                     )
 
-                    if GSHEET is None:
-                        st.warning("Master store not configured; Calls will not persist.")
-                        df_calls_master = processed_clean.copy()
-                    else:
-                        current = _read_ws_by_name("CALLS")
+                if GSHEET is None:
+                    st.warning("Master store not configured; Calls will not persist.")
+                    df_calls_master = processed_clean.copy()
+                else:
+                    current = _read_ws_by_name("CALLS")
                         
                         # Remove existing batch if force replace
                         if force_replace_calls and batch_exists and not current.empty:
                             current = current[current["__batch_id"] != batch_id].copy()
                         
-                        combined = (pd.concat([current, processed_clean], ignore_index=True)
-                                    if not current.empty else processed_clean.copy())
+                    combined = (pd.concat([current, processed_clean], ignore_index=True)
+                                if not current.empty else processed_clean.copy())
                         
                         # Dedupe by Month-Year + Name + Category (keeping latest batch)
-                        key = (combined["Month-Year"].astype(str).str.strip() + "|" +
-                               combined["Name"].astype(str).str.strip() + "|" +
-                               combined["Category"].astype(str).str.strip())
-                        combined = combined.loc[~key.duplicated(keep="last")].copy()
+                    key = (combined["Month-Year"].astype(str).str.strip() + "|" +
+                           combined["Name"].astype(str).str.strip() + "|" +
+                           combined["Category"].astype(str).str.strip())
+                    combined = combined.loc[~key.duplicated(keep="last")].copy()
                         
-                        _write_ws_by_name("CALLS", combined)
+                    _write_ws_by_name("CALLS", combined)
                         st.success(f"Calls: upserted {len(processed_clean)} row(s) with batch ID '{batch_id}'.")
-                        df_calls_master = combined.copy()
-                    st.session_state["hashes_calls"].add(fhash)
+                    df_calls_master = combined.copy()
+                st.session_state["hashes_calls"].add(fhash)
         except Exception as e:
             st.error("Could not parse Calls CSV."); st.exception(e)
 
@@ -1199,133 +1199,133 @@ st.markdown("---")
 st.header("📞 Zoom Call Reports")
 
 with st.expander("📞 Calls Report", expanded=False):
-    st.subheader("Filters — Calls")
-    months_map = {"01":"January","02":"February","03":"March","04":"April","05":"May","06":"June",
-                  "07":"July","08":"August","09":"September","10":"October","11":"November","12":"December"}
-    def month_num_to_name(mnum): return months_map.get(mnum, mnum)
+st.subheader("Filters — Calls")
+months_map = {"01":"January","02":"February","03":"March","04":"April","05":"May","06":"June",
+              "07":"July","08":"August","09":"September","10":"October","11":"November","12":"December"}
+def month_num_to_name(mnum): return months_map.get(mnum, mnum)
 
-    def union_months_from(df):
-        if isinstance(df, pd.DataFrame) and not df.empty and "Month-Year" in df.columns:
-            return sorted(set(df["Month-Year"].dropna().astype(str)))
-        return []
+def union_months_from(df):
+    if isinstance(df, pd.DataFrame) and not df.empty and "Month-Year" in df.columns:
+        return sorted(set(df["Month-Year"].dropna().astype(str)))
+    return []
 
-    all_months = union_months_from(df_calls)
-    if all_months:
-        latest_my = max(all_months)
-        latest_year, latest_mnum = latest_my.split("-")
-        latest_mname = month_num_to_name(latest_mnum)
+all_months = union_months_from(df_calls)
+if all_months:
+    latest_my = max(all_months)
+    latest_year, latest_mnum = latest_my.split("-")
+    latest_mname = month_num_to_name(latest_mnum)
+else:
+    latest_year, latest_mname = "All", "All"
+
+c1, c2, c3, c4 = st.columns(4)
+years = sorted({m.split("-")[0] for m in all_months})
+year_options = ["All"] + years if years else ["All"]
+sel_year = c1.selectbox("Year", year_options, index=(year_options.index(latest_year) if latest_year in year_options else 0))
+
+def months_for_year(year_sel: str):
+    if year_sel == "All": return sorted({m.split("-")[1] for m in all_months})
+    return sorted({m.split("-")[1] for m in all_months if m.startswith(year_sel)})
+
+mnums = months_for_year(sel_year)
+mnames = [month_num_to_name(m) for m in mnums]
+month_options = ["All"] + mnames if mnames else ["All"]
+sel_month_name = c2.selectbox("Month", month_options,
+                              index=(month_options.index(latest_mname) if latest_mname in month_options else 0))
+
+cat_choices = ["All"] + (sorted(df_calls["Category"].unique().tolist()) if not df_calls.empty else [])
+sel_cat = c3.selectbox("Category", cat_choices, index=0)
+base = df_calls if sel_cat == "All" else df_calls[df_calls["Category"] == sel_cat]
+name_choices = ["All"] + (sorted(base["Name"].unique().tolist()) if not base.empty else [])
+sel_name = c4.selectbox("Name", name_choices, index=0)
+
+def calls_period_mask(df: pd.DataFrame) -> pd.Series:
+    if df.empty or "Month-Year" not in df.columns:
+        return pd.Series([], dtype=bool)
+    m = pd.Series(True, index=df.index)
+    if sel_year != "All":
+        m &= df["Month-Year"].astype(str).str.startswith(sel_year)
+    if sel_month_name != "All":
+        month_num = next((k for k, v in months_map.items() if v == sel_month_name), None)
+        if month_num:
+            m &= df["Month-Year"].astype(str).str.endswith(month_num)
+    return m
+
+filtered_calls = df_calls.loc[calls_period_mask(df_calls)].copy()
+mask_calls_extra = pd.Series(True, index=filtered_calls.index)
+if sel_cat != "All":  mask_calls_extra &= filtered_calls["Category"] == sel_cat
+if sel_name != "All": mask_calls_extra &= filtered_calls["Name"] == sel_name
+view_calls = filtered_calls.loc[mask_calls_extra].copy()
+
+st.subheader("Calls — Results")
+calls_display_cols = [
+    "Category","Name","Total Calls","Completed Calls","Outgoing","Received",
+    "Forwarded to Voicemail","Answered by Other","Missed",
+    "Avg Call Time","Total Call Time","Total Hold Time","Month-Year"
+]
+if not view_calls.empty:
+    st.dataframe(view_calls[calls_display_cols], hide_index=True, use_container_width=True)
+    csv_buf = io.StringIO()
+    view_calls[calls_display_cols].to_csv(csv_buf, index=False)
+    st.download_button("Download filtered Calls CSV", csv_buf.getvalue(),
+                       file_name="call_report_filtered.csv", type="primary")
+else:
+    st.info("No rows match the current Calls filters.")
+
+st.subheader("Calls — Visualizations")
+try:
+    import plotly.express as px
+    plotly_ok = True
+except Exception:
+    plotly_ok = False
+    st.info("Charts unavailable (install `plotly>=5.22` in requirements.txt).")
+
+if not view_calls.empty and plotly_ok:
+    vol = (view_calls.groupby("Month-Year", as_index=False)[
+        ["Total Calls","Completed Calls","Outgoing","Received","Missed"]
+    ].sum())
+    vol["_ym"] = pd.to_datetime(vol["Month-Year"]+"-01", format="%Y-%m-%d", errors="coerce")
+    vol = vol.sort_values("_ym")
+    vol_long = vol.melt(id_vars=["Month-Year","_ym"],
+                        value_vars=["Total Calls","Completed Calls","Outgoing","Received","Missed"],
+                        var_name="Metric", value_name="Count")
+    with st.expander("📈 Call volume trend over time", expanded=False):
+        fig1 = px.line(vol_long, x="_ym", y="Count", color="Metric", markers=True,
+                       labels={"_ym":"Month","Count":"Calls"})
+        fig1.update_layout(xaxis=dict(tickformat="%b %Y"))
+        st.plotly_chart(fig1, use_container_width=True)
+
+    comp = view_calls.groupby("Name", as_index=False)[["Completed Calls", "Total Calls"]].sum()
+    if comp.empty or not {"Completed Calls","Total Calls"} <= set(comp.columns):
+        with st.expander("✅ Completion rate by staff", expanded=False):
+            st.info("No data available to compute completion rates for the current filters.")
     else:
-        latest_year, latest_mname = "All", "All"
+        c_done = pd.to_numeric(comp["Completed Calls"], errors="coerce").fillna(0.0)
+        c_tot  = pd.to_numeric(comp["Total Calls"], errors="coerce").fillna(0.0)
+        comp["Completion Rate (%)"] = (c_done / c_tot.where(c_tot != 0, pd.NA) * 100).fillna(0.0)
+        comp = comp.sort_values("Completion Rate (%)", ascending=False)
+        with st.expander("✅ Completion rate by staff", expanded=False):
+            fig2 = px.bar(comp, x="Name", y="Completion Rate (%)",
+                          labels={"Name":"Staff","Completion Rate (%)":"Completion Rate (%)"})
+            fig2.update_layout(xaxis={'categoryorder':'array','categoryarray':comp["Name"].tolist()})
+            st.plotly_chart(fig2, use_container_width=True)
 
-    c1, c2, c3, c4 = st.columns(4)
-    years = sorted({m.split("-")[0] for m in all_months})
-    year_options = ["All"] + years if years else ["All"]
-    sel_year = c1.selectbox("Year", year_options, index=(year_options.index(latest_year) if latest_year in year_options else 0))
-
-    def months_for_year(year_sel: str):
-        if year_sel == "All": return sorted({m.split("-")[1] for m in all_months})
-        return sorted({m.split("-")[1] for m in all_months if m.startswith(year_sel)})
-
-    mnums = months_for_year(sel_year)
-    mnames = [month_num_to_name(m) for m in mnums]
-    month_options = ["All"] + mnames if mnames else ["All"]
-    sel_month_name = c2.selectbox("Month", month_options,
-                                  index=(month_options.index(latest_mname) if latest_mname in month_options else 0))
-
-    cat_choices = ["All"] + (sorted(df_calls["Category"].unique().tolist()) if not df_calls.empty else [])
-    sel_cat = c3.selectbox("Category", cat_choices, index=0)
-    base = df_calls if sel_cat == "All" else df_calls[df_calls["Category"] == sel_cat]
-    name_choices = ["All"] + (sorted(base["Name"].unique().tolist()) if not base.empty else [])
-    sel_name = c4.selectbox("Name", name_choices, index=0)
-
-    def calls_period_mask(df: pd.DataFrame) -> pd.Series:
-        if df.empty or "Month-Year" not in df.columns:
-            return pd.Series([], dtype=bool)
-        m = pd.Series(True, index=df.index)
-        if sel_year != "All":
-            m &= df["Month-Year"].astype(str).str.startswith(sel_year)
-        if sel_month_name != "All":
-            month_num = next((k for k, v in months_map.items() if v == sel_month_name), None)
-            if month_num:
-                m &= df["Month-Year"].astype(str).str.endswith(month_num)
-        return m
-
-    filtered_calls = df_calls.loc[calls_period_mask(df_calls)].copy()
-    mask_calls_extra = pd.Series(True, index=filtered_calls.index)
-    if sel_cat != "All":  mask_calls_extra &= filtered_calls["Category"] == sel_cat
-    if sel_name != "All": mask_calls_extra &= filtered_calls["Name"] == sel_name
-    view_calls = filtered_calls.loc[mask_calls_extra].copy()
-
-    st.subheader("Calls — Results")
-    calls_display_cols = [
-        "Category","Name","Total Calls","Completed Calls","Outgoing","Received",
-        "Forwarded to Voicemail","Answered by Other","Missed",
-        "Avg Call Time","Total Call Time","Total Hold Time","Month-Year"
-    ]
-    if not view_calls.empty:
-        st.dataframe(view_calls[calls_display_cols], hide_index=True, use_container_width=True)
-        csv_buf = io.StringIO()
-        view_calls[calls_display_cols].to_csv(csv_buf, index=False)
-        st.download_button("Download filtered Calls CSV", csv_buf.getvalue(),
-                           file_name="call_report_filtered.csv", type="primary")
-    else:
-        st.info("No rows match the current Calls filters.")
-
-    st.subheader("Calls — Visualizations")
-    try:
-        import plotly.express as px
-        plotly_ok = True
-    except Exception:
-        plotly_ok = False
-        st.info("Charts unavailable (install `plotly>=5.22` in requirements.txt).")
-
-    if not view_calls.empty and plotly_ok:
-        vol = (view_calls.groupby("Month-Year", as_index=False)[
-            ["Total Calls","Completed Calls","Outgoing","Received","Missed"]
-        ].sum())
-        vol["_ym"] = pd.to_datetime(vol["Month-Year"]+"-01", format="%Y-%m-%d", errors="coerce")
-        vol = vol.sort_values("_ym")
-        vol_long = vol.melt(id_vars=["Month-Year","_ym"],
-                            value_vars=["Total Calls","Completed Calls","Outgoing","Received","Missed"],
-                            var_name="Metric", value_name="Count")
-        with st.expander("📈 Call volume trend over time", expanded=False):
-            fig1 = px.line(vol_long, x="_ym", y="Count", color="Metric", markers=True,
-                           labels={"_ym":"Month","Count":"Calls"})
-            fig1.update_layout(xaxis=dict(tickformat="%b %Y"))
-            st.plotly_chart(fig1, use_container_width=True)
-
-        comp = view_calls.groupby("Name", as_index=False)[["Completed Calls", "Total Calls"]].sum()
-        if comp.empty or not {"Completed Calls","Total Calls"} <= set(comp.columns):
-            with st.expander("✅ Completion rate by staff", expanded=False):
-                st.info("No data available to compute completion rates for the current filters.")
-        else:
-            c_done = pd.to_numeric(comp["Completed Calls"], errors="coerce").fillna(0.0)
-            c_tot  = pd.to_numeric(comp["Total Calls"], errors="coerce").fillna(0.0)
-            comp["Completion Rate (%)"] = (c_done / c_tot.where(c_tot != 0, pd.NA) * 100).fillna(0.0)
-            comp = comp.sort_values("Completion Rate (%)", ascending=False)
-            with st.expander("✅ Completion rate by staff", expanded=False):
-                fig2 = px.bar(comp, x="Name", y="Completion Rate (%)",
-                              labels={"Name":"Staff","Completion Rate (%)":"Completion Rate (%)"})
-                fig2.update_layout(xaxis={'categoryorder':'array','categoryarray':comp["Name"].tolist()})
-                st.plotly_chart(fig2, use_container_width=True)
-
-        tmp = view_calls.copy()
-        tmp["__avg_sec"]   = pd.to_numeric(tmp.get("__avg_sec", 0), errors="coerce").fillna(0.0)
-        tmp["Total Calls"] = pd.to_numeric(tmp.get("Total Calls", 0), errors="coerce").fillna(0.0)
-        tmp["weighted_sum"] = tmp["__avg_sec"] * tmp["Total Calls"]
-        by = tmp.groupby("Name", as_index=False).agg(
-            weighted_sum=("weighted_sum", "sum"),
-            total_calls=("Total Calls", "sum"),
-        )
-        by["Avg Minutes"] = by.apply(
-            lambda r: (r["weighted_sum"] / r["total_calls"] / 60.0) if r["total_calls"] > 0 else 0.0,
-            axis=1,
-        )
-        by = by.sort_values("Avg Minutes", ascending=False)
-        with st.expander("⏱️ Average call duration by staff (minutes)", expanded=False):
-            fig3 = px.bar(by, x="Avg Minutes", y="Name", orientation="h",
-                          labels={"Avg Minutes":"Minutes","Name":"Staff"})
-            st.plotly_chart(fig3, use_container_width=True)
+    tmp = view_calls.copy()
+    tmp["__avg_sec"]   = pd.to_numeric(tmp.get("__avg_sec", 0), errors="coerce").fillna(0.0)
+    tmp["Total Calls"] = pd.to_numeric(tmp.get("Total Calls", 0), errors="coerce").fillna(0.0)
+    tmp["weighted_sum"] = tmp["__avg_sec"] * tmp["Total Calls"]
+    by = tmp.groupby("Name", as_index=False).agg(
+        weighted_sum=("weighted_sum", "sum"),
+        total_calls=("Total Calls", "sum"),
+    )
+    by["Avg Minutes"] = by.apply(
+        lambda r: (r["weighted_sum"] / r["total_calls"] / 60.0) if r["total_calls"] > 0 else 0.0,
+        axis=1,
+    )
+    by = by.sort_values("Avg Minutes", ascending=False)
+    with st.expander("⏱️ Average call duration by staff (minutes)", expanded=False):
+        fig3 = px.bar(by, x="Avg Minutes", y="Name", orientation="h",
+                      labels={"Avg Minutes":"Minutes","Name":"Staff"})
+        st.plotly_chart(fig3, use_container_width=True)
 
 # ───────────────────────────────────────────────────────────────────────────────
 # 📊 Firm Conversion Report
@@ -1334,43 +1334,43 @@ st.markdown("---")
 st.header("📊 Firm Conversion Report")
 
 with st.expander("📅 Filter", expanded=False):
-    row = st.columns([2, 1, 1])  # Period (wide), Year, Month
+row = st.columns([2, 1, 1])  # Period (wide), Year, Month
 
-    months_map_names = {
-        1:"January",2:"February",3:"March",4:"April",5:"May",6:"June",
-        7:"July",8:"August",9:"September",10:"October",11:"November",12:"December"
-    }
-    month_nums = list(months_map_names.keys())
+months_map_names = {
+    1:"January",2:"February",3:"March",4:"April",5:"May",6:"June",
+    7:"July",8:"August",9:"September",10:"October",11:"November",12:"December"
+}
+month_nums = list(months_map_names.keys())
 
-    def _years_from(*dfs_cols):
-        ys = set()
-        for df, col in dfs_cols:
-            if df is not None and not df.empty and col in df.columns:
-                ys |= set(pd.to_datetime(df[col], errors="coerce").dt.year.dropna().astype(int))
-        return ys
+def _years_from(*dfs_cols):
+    ys = set()
+    for df, col in dfs_cols:
+        if df is not None and not df.empty and col in df.columns:
+            ys |= set(pd.to_datetime(df[col], errors="coerce").dt.year.dropna().astype(int))
+    return ys
 
-    years_detected = _years_from(
-        (df_ncl,  "Date we had BOTH the signed CLA and full payment"),
-        (df_init, "Initial Consultation With Pji Law"),
-        (df_disc, "Discovery Meeting With Pji Law"),
+years_detected = _years_from(
+    (df_ncl,  "Date we had BOTH the signed CLA and full payment"),
+    (df_init, "Initial Consultation With Pji Law"),
+    (df_disc, "Discovery Meeting With Pji Law"),
+)
+years_conv = sorted(years_detected) if years_detected else [date.today().year]
+
+with row[0]:
+    period_mode = st.radio(
+        "Period",
+        ["Month to date", "Full month", "Year to date", "Week of month", "Custom range"],
+        horizontal=True,
     )
-    years_conv = sorted(years_detected) if years_detected else [date.today().year]
-
-    with row[0]:
-        period_mode = st.radio(
-            "Period",
-            ["Month to date", "Full month", "Year to date", "Week of month", "Custom range"],
-            horizontal=True,
-        )
-    with row[1]:
-        sel_year_conv = st.selectbox("Year", years_conv, index=len(years_conv)-1)
-    with row[2]:
-        sel_month_num = st.selectbox(
-            "Month",
-            month_nums,
-            index=date.today().month-1,
-            format_func=lambda m: months_map_names[m]
-        )
+with row[1]:
+    sel_year_conv = st.selectbox("Year", years_conv, index=len(years_conv)-1)
+with row[2]:
+    sel_month_num = st.selectbox(
+        "Month",
+        month_nums,
+        index=date.today().month-1,
+        format_func=lambda m: months_map_names[m]
+    )
 
 week_defs = None
 sel_week_idx = 1
@@ -1575,7 +1575,7 @@ html_table = """
 </table>
 """
 with st.expander("📊 Summary", expanded=False):
-    st.markdown(html_table, unsafe_allow_html=True)
+st.markdown(html_table, unsafe_allow_html=True)
 
 st.header("📊 Practice Area")
 
@@ -2463,16 +2463,16 @@ st.markdown("---")
 st.header("🔧 Debugging & Troubleshooting")
 
 with st.expander("Debugging & Troubleshooting", expanded=False):
-    with st.expander("🔧 IC/DM sanity (per sheet & PA) — current window", expanded=False):
-        ic_L = _col_by_idx(df_init, 11); ic_M = _col_by_idx(df_init, 12)
-        dm_L = _col_by_idx(df_disc, 11); dm_P = _col_by_idx(df_disc, 15)
-        st.write("IC Lead (L):", ic_L, "IC Date (M):", ic_M)
-        st.write("DM Lead (L):", dm_L, "DM Date (P):", dm_P)
+with st.expander("🔧 IC/DM sanity (per sheet & PA) — current window", expanded=False):
+    ic_L = _col_by_idx(df_init, 11); ic_M = _col_by_idx(df_init, 12)
+    dm_L = _col_by_idx(df_disc, 11); dm_P = _col_by_idx(df_disc, 15)
+    st.write("IC Lead (L):", ic_L, "IC Date (M):", ic_M)
+    st.write("DM Lead (L):", dm_L, "DM Date (P):", dm_P)
         st.write("Date range filter:", start_date, "to", end_date)
         st.write("Raw met counts from function:", met_counts_raw)
-        st.write("Per-attorney MET (IC+DM index-based):", met_by_attorney, "TOTAL =", sum(met_by_attorney.values()))
-        for pa in ["Estate Planning","Estate Administration","Civil Litigation","Business transactional","Other"]:
-            names = [n for n in CANON if _practice_for(n) == pa]
+    st.write("Per-attorney MET (IC+DM index-based):", met_by_attorney, "TOTAL =", sum(met_by_attorney.values()))
+    for pa in ["Estate Planning","Estate Administration","Civil Litigation","Business transactional","Other"]:
+        names = [n for n in CANON if _practice_for(n) == pa]
             pa_total = sum(met_by_attorney.get(n, 0) for n in names)
             st.write(pa, "met =", pa_total, "by", {n: met_by_attorney.get(n, 0) for n in names})
             
@@ -2507,172 +2507,172 @@ with st.expander("Debugging & Troubleshooting", expanded=False):
                     dm_ep = dm_t.loc[dm_m & dm_t[dm_att].astype(str).str.strip().isin(ep_names)]
                     st.write("DM - EP attorneys in range:", dm_ep[dm_att].value_counts().to_dict())
 
-    with st.expander("🔧 NCL retained sanity — headers & sample", expanded=False):
-        if isinstance(df_ncl, pd.DataFrame) and not df_ncl.empty:
-            st.write("NCL columns (index → name):", {i: c for i, c in enumerate(df_ncl.columns)})
-            # Show which headers were picked and the first 20 included rows
-            def _norm(s): 
-                s = str(s).lower().strip(); 
-                s = _re.sub(r"[\s_]+", " ", s); 
-                s = _re.sub(r"[^a-z0-9 ]", "", s); 
-                return s
-            cols = list(df_ncl.columns); norms = {c: _norm(c) for c in cols}
+with st.expander("🔧 NCL retained sanity — headers & sample", expanded=False):
+    if isinstance(df_ncl, pd.DataFrame) and not df_ncl.empty:
+        st.write("NCL columns (index → name):", {i: c for i, c in enumerate(df_ncl.columns)})
+        # Show which headers were picked and the first 20 included rows
+        def _norm(s): 
+            s = str(s).lower().strip(); 
+            s = _re.sub(r"[\s_]+", " ", s); 
+            s = _re.sub(r"[^a-z0-9 ]", "", s); 
+            return s
+        cols = list(df_ncl.columns); norms = {c: _norm(c) for c in cols}
             
             # Show what columns were found with each approach
-            prefer_date = _norm("Date we had BOTH the signed CLA and full payment")
-            picked_date = next((c for c in cols if norms[c] == prefer_date), None)
-            if picked_date is None:
-                cands = [c for c in cols if all(tok in norms[c] for tok in ["date","signed","payment"])]
-                if cands:
-                    cands.sort(key=lambda c: len(norms[c])); picked_date = cands[0]
+        prefer_date = _norm("Date we had BOTH the signed CLA and full payment")
+        picked_date = next((c for c in cols if norms[c] == prefer_date), None)
+        if picked_date is None:
+            cands = [c for c in cols if all(tok in norms[c] for tok in ["date","signed","payment"])]
+            if cands:
+                cands.sort(key=lambda c: len(norms[c])); picked_date = cands[0]
             if picked_date is None:
                 picked_date = next((c for c in cols if "date" in norms[c]), None)
             if picked_date is None and len(cols) > 6:
                 picked_date = cols[6]  # Column G
                 
-            picked_init = next((c for c in cols if all(tok in norms[c] for tok in ["responsible","attorney"])), None)
+        picked_init = next((c for c in cols if all(tok in norms[c] for tok in ["responsible","attorney"])), None)
             if picked_init is None:
                 picked_init = next((c for c in cols if "attorney" in norms[c]), None)
             if picked_init is None and len(cols) > 4:
                 picked_init = cols[4]  # Column E
                 
-            prefer_flag = _norm("Retained With Consult (Y/N)")
-            picked_flag = next((c for c in cols if norms[c] == prefer_flag), None)
-            if picked_flag is None:
-                picked_flag = next((c for c in cols if all(tok in norms[c] for tok in ["retained","consult"])), None)
+        prefer_flag = _norm("Retained With Consult (Y/N)")
+        picked_flag = next((c for c in cols if norms[c] == prefer_flag), None)
+        if picked_flag is None:
+            picked_flag = next((c for c in cols if all(tok in norms[c] for tok in ["retained","consult"])), None)
             if picked_flag is None:
                 picked_flag = next((c for c in cols if "retained" in norms[c]), None)
             if picked_flag is None and len(cols) > 5:
                 picked_flag = cols[5]  # Column F
                 
-            st.write("Picked columns → date:", picked_date, " initials:", picked_init, " flag:", picked_flag)
+        st.write("Picked columns → date:", picked_date, " initials:", picked_init, " flag:", picked_flag)
             st.write("Date range filter:", start_date, "to", end_date)
 
-            if picked_date and picked_init and picked_flag:
-                t = df_ncl.copy()
-                in_range = _between_inclusive(t[picked_date], start_date, end_date)
-                kept = t[picked_flag].astype(str).str.strip().str.upper().ne("N")
+        if picked_date and picked_init and picked_flag:
+            t = df_ncl.copy()
+            in_range = _between_inclusive(t[picked_date], start_date, end_date)
+            kept = t[picked_flag].astype(str).str.strip().str.upper().ne("N")
                 st.write("Rows in date range:", in_range.sum())
                 st.write("Rows with retained flag != 'N':", kept.sum())
                 st.write("Rows meeting both criteria:", (in_range & kept).sum())
                 
-                sample = t.loc[in_range & kept, [picked_init, picked_flag, picked_date]].head(20)
-                st.write("First 20 rows in range & kept:", sample)
+            sample = t.loc[in_range & kept, [picked_init, picked_flag, picked_date]].head(20)
+            st.write("First 20 rows in range & kept:", sample)
                 
                 # Show some sample data from the picked columns
                 st.write("Sample data from picked columns:")
                 sample_all = t[[picked_init, picked_flag, picked_date]].head(10)
                 st.write(sample_all)
-        else:
-            st.write("No NCL rows loaded for the current window.")
+    else:
+        st.write("No NCL rows loaded for the current window.")
 
-    # --- Estate Planning inclusion audit (row-level) ---
-    with st.expander("🔬 Estate Planning — inclusion audit (IC: L/M/G/I, DM: L/P/G/I)", expanded=False):
-        EP_NAMES = ["Connor Watkins", "Jennifer Fox", "Rebecca Megel"]
+# --- Estate Planning inclusion audit (row-level) ---
+with st.expander("🔬 Estate Planning — inclusion audit (IC: L/M/G/I, DM: L/P/G/I)", expanded=False):
+    EP_NAMES = ["Connor Watkins", "Jennifer Fox", "Rebecca Megel"]
 
-        def _audit_sheet(df: pd.DataFrame, att_idx: int, date_idx: int, sub_idx: int, reason_idx: int, src: str) -> pd.DataFrame:
-            if not isinstance(df, pd.DataFrame) or df.empty or df.shape[1] <= max(att_idx, date_idx, sub_idx, reason_idx):
+    def _audit_sheet(df: pd.DataFrame, att_idx: int, date_idx: int, sub_idx: int, reason_idx: int, src: str) -> pd.DataFrame:
+        if not isinstance(df, pd.DataFrame) or df.empty or df.shape[1] <= max(att_idx, date_idx, sub_idx, reason_idx):
                 return pd.DataFrame(columns=["Attorney","Date","Source","Sub Status","Reason","InRange","IsFollowUp","HasCanceledMeeting","HasNoShow","Included"])
-            att, dtc, sub, rsn = df.columns[att_idx], df.columns[date_idx], df.columns[sub_idx], df.columns[reason_idx]
-            t = df[[att, dtc, sub, rsn]].copy()
-            t.columns = ["Attorney","Date","Sub Status","Reason"]
-            t["Attorney"] = t["Attorney"].astype(str).str.strip()
-            t = t[t["Attorney"].isin(EP_NAMES)].copy()
+        att, dtc, sub, rsn = df.columns[att_idx], df.columns[date_idx], df.columns[sub_idx], df.columns[reason_idx]
+        t = df[[att, dtc, sub, rsn]].copy()
+        t.columns = ["Attorney","Date","Sub Status","Reason"]
+        t["Attorney"] = t["Attorney"].astype(str).str.strip()
+        t = t[t["Attorney"].isin(EP_NAMES)].copy()
 
-            # parse using the same helpers as main logic
-            dt = _to_ts(t["Date"])
-            t["Date"] = dt
-            t["Source"] = src
-            t["InRange"] = (dt.dt.date >= start_date) & (dt.dt.date <= end_date)
-            t["IsFollowUp"] = t["Sub Status"].astype(str).str.strip().str.lower().eq("follow up")
+        # parse using the same helpers as main logic
+        dt = _to_ts(t["Date"])
+        t["Date"] = dt
+        t["Source"] = src
+        t["InRange"] = (dt.dt.date >= start_date) & (dt.dt.date <= end_date)
+        t["IsFollowUp"] = t["Sub Status"].astype(str).str.strip().str.lower().eq("follow up")
             # Check for "Canceled Meeting" or "No Show" in reason
             reason_str = t["Reason"].astype(str).str.strip().str.lower()
             t["HasCanceledMeeting"] = reason_str.str.contains("canceled meeting", na=False)
             t["HasNoShow"] = reason_str.str.contains("no show", na=False)
             t["Included"] = t["InRange"] & ~t["IsFollowUp"] & ~t["HasCanceledMeeting"] & ~t["HasNoShow"]
-            return t
+        return t
 
-        ic_audit = _audit_sheet(df_init, 11, 12, 6, 8, "IC") if isinstance(df_init, pd.DataFrame) else pd.DataFrame()
-        dm_audit = _audit_sheet(df_disc, 11, 15, 6, 8, "DM") if isinstance(df_disc, pd.DataFrame) else pd.DataFrame()
-        ep_audit = pd.concat([ic_audit, dm_audit], ignore_index=True) if not ic_audit.empty or not dm_audit.empty else pd.DataFrame()
+    ic_audit = _audit_sheet(df_init, 11, 12, 6, 8, "IC") if isinstance(df_init, pd.DataFrame) else pd.DataFrame()
+    dm_audit = _audit_sheet(df_disc, 11, 15, 6, 8, "DM") if isinstance(df_disc, pd.DataFrame) else pd.DataFrame()
+    ep_audit = pd.concat([ic_audit, dm_audit], ignore_index=True) if not ic_audit.empty or not dm_audit.empty else pd.DataFrame()
 
-        if ep_audit.empty:
-            st.info("No Estate Planning rows found in the current window.")
+    if ep_audit.empty:
+        st.info("No Estate Planning rows found in the current window.")
             summary = pd.DataFrame()
-        else:
-            summary = ep_audit.groupby(["Attorney","Source"], dropna=False).agg(
-                total=("Included", "size"),
-                in_range=("InRange","sum"),
-                excluded_followup=("IsFollowUp","sum"),
+    else:
+        summary = ep_audit.groupby(["Attorney","Source"], dropna=False).agg(
+            total=("Included", "size"),
+            in_range=("InRange","sum"),
+            excluded_followup=("IsFollowUp","sum"),
                 excluded_canceled=("HasCanceledMeeting","sum"),
                 excluded_noshow=("HasNoShow","sum"),
-                included=("Included","sum"),
-            ).reset_index()
+            included=("Included","sum"),
+        ).reset_index()
         
         if not summary.empty:
-            st.write("Estate Planning — summary by attorney & source:", summary)
+        st.write("Estate Planning — summary by attorney & source:", summary)
         
         if not ep_audit.empty and "Included" in ep_audit.columns:
-            st.write("**EP totals — Included = met (IC+DM):**", int(ep_audit["Included"].sum()))
+        st.write("**EP totals — Included = met (IC+DM):**", int(ep_audit["Included"].sum()))
             show_cols = ["Attorney","Date","Source","Sub Status","Reason","InRange","IsFollowUp","HasCanceledMeeting","HasNoShow","Included"]
-            st.dataframe(ep_audit[show_cols].sort_values(["Date","Attorney"]).reset_index(drop=True),
-                         use_container_width=True)
+        st.dataframe(ep_audit[show_cols].sort_values(["Date","Attorney"]).reset_index(drop=True),
+                     use_container_width=True)
         else:
             st.info("No Estate Planning data available for the selected date range.")
 
 
-    with st.expander("Debug details (for reconciliation)", expanded=False):
-        if not df_leads.empty and "Stage" in df_leads.columns and len(leads_in_range) == len(df_leads):
-            st.write("Leads_PNCs — Stage (in selected period)",
-                     df_leads.loc[leads_in_range, "Stage"].value_counts(dropna=False))
-        if not init_in.empty:
-            st.write("Initial_Consultation — in range", init_in.shape)
-        if not disc_in.empty:
-            st.write("Discovery_Meeting — in range", disc_in.shape)
-        if ncl_flag_col:
-            st.write("New Client List — Retained split (in range)", ncl_in[ncl_flag_col].value_counts(dropna=False))
-        st.write(
-            f"Computed: Leads={row1}, PNCs={row2}, "
-            f"Retained w/out consult={row3}, Scheduled={row4} ({row5}%), "
-            f"Showed={row6} ({row7}%), Retained after consult={row8} ({row9}%), "
-            f"Total retained={row10} ({row11}%)"
-        )
-    with st.expander("🔬 Estate Planning — inclusion audit (why met != your expectation?)", expanded=False):
-        EP_NAMES = ["Connor Watkins", "Jennifer Fox", "Rebecca Megel"]
+with st.expander("Debug details (for reconciliation)", expanded=False):
+    if not df_leads.empty and "Stage" in df_leads.columns and len(leads_in_range) == len(df_leads):
+        st.write("Leads_PNCs — Stage (in selected period)",
+                 df_leads.loc[leads_in_range, "Stage"].value_counts(dropna=False))
+    if not init_in.empty:
+        st.write("Initial_Consultation — in range", init_in.shape)
+    if not disc_in.empty:
+        st.write("Discovery_Meeting — in range", disc_in.shape)
+    if ncl_flag_col:
+        st.write("New Client List — Retained split (in range)", ncl_in[ncl_flag_col].value_counts(dropna=False))
+    st.write(
+        f"Computed: Leads={row1}, PNCs={row2}, "
+        f"Retained w/out consult={row3}, Scheduled={row4} ({row5}%), "
+        f"Showed={row6} ({row7}%), Retained after consult={row8} ({row9}%), "
+        f"Total retained={row10} ({row11}%)"
+    )
+with st.expander("🔬 Estate Planning — inclusion audit (why met != your expectation?)", expanded=False):
+    EP_NAMES = ["Connor Watkins", "Jennifer Fox", "Rebecca Megel"]
 
-        def _audit_sheet(df: pd.DataFrame, att_idx: int, date_idx: int, sub_idx: int, reason_idx: int, src: str) -> pd.DataFrame:
-            if not isinstance(df, pd.DataFrame) or df.empty or df.shape[1] <= max(att_idx, date_idx, sub_idx, reason_idx):
+    def _audit_sheet(df: pd.DataFrame, att_idx: int, date_idx: int, sub_idx: int, reason_idx: int, src: str) -> pd.DataFrame:
+        if not isinstance(df, pd.DataFrame) or df.empty or df.shape[1] <= max(att_idx, date_idx, sub_idx, reason_idx):
                 return pd.DataFrame(columns=["Attorney","Date","Source","Sub Status","Reason","InRange","IsFollowUp","HasCanceledMeeting","HasNoShow","Included"])
-            att, dtc, sub, rsn = df.columns[att_idx], df.columns[date_idx], df.columns[sub_idx], df.columns[reason_idx]
-            t = df[[att, dtc, sub, rsn]].copy()
-            t.columns = ["Attorney","Date","Sub Status","Reason"]
-            t["Attorney"] = t["Attorney"].astype(str).str.strip()
-            t = t[t["Attorney"].isin(EP_NAMES)].copy()
+        att, dtc, sub, rsn = df.columns[att_idx], df.columns[date_idx], df.columns[sub_idx], df.columns[reason_idx]
+        t = df[[att, dtc, sub, rsn]].copy()
+        t.columns = ["Attorney","Date","Sub Status","Reason"]
+        t["Attorney"] = t["Attorney"].astype(str).str.strip()
+        t = t[t["Attorney"].isin(EP_NAMES)].copy()
 
-            # same parsing rules used in the main logic
-            x = t["Date"].astype(str)
-            x = x.str.replace("–","-", regex=False).str.replace(","," ", regex=False)
-            x = x.str.replace(r"\s+at\s+"," ", regex=True).str.replace(r"\s+(ET|EDT|EST|CT|CDT|CST|MT|MDT|MST|PT|PDT)\b","", regex=True)
-            x = x.str.replace(r"(\d)(am|pm)\b", r"\1 \2", regex=True)
-            x = x.str.replace(r"\s+"," ", regex=True).str.strip()
+        # same parsing rules used in the main logic
+        x = t["Date"].astype(str)
+        x = x.str.replace("–","-", regex=False).str.replace(","," ", regex=False)
+        x = x.str.replace(r"\s+at\s+"," ", regex=True).str.replace(r"\s+(ET|EDT|EST|CT|CDT|CST|MT|MDT|MST|PT|PDT)\b","", regex=True)
+        x = x.str.replace(r"(\d)(am|pm)\b", r"\1 \2", regex=True)
+        x = x.str.replace(r"\s+"," ", regex=True).str.strip()
             dt = pd.to_datetime(x, errors="coerce", format="mixed")
-            if dt.isna().any():
-                y = dt.copy()
-                for fmt in ("%m/%d/%Y %I:%M %p", "%m/%d/%Y %H:%M", "%Y-%m-%d %H:%M", "%m/%d/%Y"):
-                    mask = y.isna()
-                    if not mask.any(): break
-                    try:
-                        y.loc[mask] = pd.to_datetime(x.loc[mask], format=fmt, errors="coerce")
-                    except Exception:
-                        pass
-                dt = y
-            try: dt = dt.dt.tz_localize(None)
-            except Exception: pass
+        if dt.isna().any():
+            y = dt.copy()
+            for fmt in ("%m/%d/%Y %I:%M %p", "%m/%d/%Y %H:%M", "%Y-%m-%d %H:%M", "%m/%d/%Y"):
+                mask = y.isna()
+                if not mask.any(): break
+                try:
+                    y.loc[mask] = pd.to_datetime(x.loc[mask], format=fmt, errors="coerce")
+                except Exception:
+                    pass
+            dt = y
+        try: dt = dt.dt.tz_localize(None)
+        except Exception: pass
 
-            t["Date"] = dt
-            t["Source"] = src
-            t["InRange"] = (t["Date"] >= pd.Timestamp(start_date)) & (t["Date"] <= pd.Timestamp(end_date))
-            t["IsFollowUp"] = t["Sub Status"].astype(str).str.strip().str.lower().eq("follow up")
+        t["Date"] = dt
+        t["Source"] = src
+        t["InRange"] = (t["Date"] >= pd.Timestamp(start_date)) & (t["Date"] <= pd.Timestamp(end_date))
+        t["IsFollowUp"] = t["Sub Status"].astype(str).str.strip().str.lower().eq("follow up")
 
             # Check for "Canceled Meeting" or "No Show" in reason
             reason_str = t["Reason"].astype(str).str.strip().str.lower()
@@ -2680,41 +2680,41 @@ with st.expander("Debugging & Troubleshooting", expanded=False):
             t["HasNoShow"] = reason_str.str.contains("no show", na=False)
 
             t["Included"] = t["InRange"] & ~t["IsFollowUp"] & ~t["HasCanceledMeeting"] & ~t["HasNoShow"]
-            return t
+        return t
 
-        # IC: L=11 (att), M=12 (date), G=6 (sub), I=8 (reason)
-        ic_audit = _audit_sheet(df_init, 11, 12, 6, 8, "IC") if isinstance(df_init, pd.DataFrame) else pd.DataFrame()
-        # DM: L=11 (att), P=15 (date), G=6 (sub), I=8 (reason)
-        dm_audit = _audit_sheet(df_disc, 11, 15, 6, 8, "DM") if isinstance(df_disc, pd.DataFrame) else pd.DataFrame()
+    # IC: L=11 (att), M=12 (date), G=6 (sub), I=8 (reason)
+    ic_audit = _audit_sheet(df_init, 11, 12, 6, 8, "IC") if isinstance(df_init, pd.DataFrame) else pd.DataFrame()
+    # DM: L=11 (att), P=15 (date), G=6 (sub), I=8 (reason)
+    dm_audit = _audit_sheet(df_disc, 11, 15, 6, 8, "DM") if isinstance(df_disc, pd.DataFrame) else pd.DataFrame()
 
-        ep_audit = pd.concat([ic_audit, dm_audit], ignore_index=True) if not ic_audit.empty or not dm_audit.empty else pd.DataFrame()
+    ep_audit = pd.concat([ic_audit, dm_audit], ignore_index=True) if not ic_audit.empty or not dm_audit.empty else pd.DataFrame()
 
-        if ep_audit.empty:
-            st.info("No Estate Planning rows found in the current window.")
-        else:
-            # Summary by attorney/source
-            summary = ep_audit.groupby(["Attorney","Source"], dropna=False).agg(
-                total=("Included", "size"),
-                in_range=("InRange","sum"),
-                excluded_followup=("IsFollowUp","sum"),
+    if ep_audit.empty:
+        st.info("No Estate Planning rows found in the current window.")
+    else:
+        # Summary by attorney/source
+        summary = ep_audit.groupby(["Attorney","Source"], dropna=False).agg(
+            total=("Included", "size"),
+            in_range=("InRange","sum"),
+            excluded_followup=("IsFollowUp","sum"),
                 excluded_canceled=("HasCanceledMeeting","sum"),
                 excluded_noshow=("HasNoShow","sum"),
-                included=("Included","sum"),
-            ).reset_index()
-            st.write("Estate Planning — summary by attorney & source:", summary)
+            included=("Included","sum"),
+        ).reset_index()
+        st.write("Estate Planning — summary by attorney & source:", summary)
 
-            # Grand totals for EP
-            st.write("**EP totals — Included = met (IC+DM):**", int(ep_audit["Included"].sum()))
-            st.caption("If your expected 23 ≠ Included total, the row-level table below shows each excluded row and why.")
+        # Grand totals for EP
+        st.write("**EP totals — Included = met (IC+DM):**", int(ep_audit["Included"].sum()))
+        st.caption("If your expected 23 ≠ Included total, the row-level table below shows each excluded row and why.")
 
-            # Row-level view (you can filter in the UI)
+        # Row-level view (you can filter in the UI)
             show_cols = ["Attorney","Date","Source","Sub Status","Reason","InRange","IsFollowUp","HasCanceledMeeting","HasNoShow","Included"]
-            st.dataframe(ep_audit[show_cols].sort_values(["Date","Attorney"]).reset_index(drop=True), use_container_width=True)
+        st.dataframe(ep_audit[show_cols].sort_values(["Date","Attorney"]).reset_index(drop=True), use_container_width=True)
 
-    with st.expander("ℹ️ Logs (tech details)", expanded=False):
-        if st.session_state["logs"]:
-            for line in st.session_state["logs"]:
-                st.code(line)
-        else:
-            st.caption("No technical logs this session.")
+with st.expander("ℹ️ Logs (tech details)", expanded=False):
+    if st.session_state["logs"]:
+        for line in st.session_state["logs"]:
+            st.code(line)
+    else:
+        st.caption("No technical logs this session.")
 
