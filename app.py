@@ -203,6 +203,16 @@ def master_reset() -> bool:
         for sheet_name in ["CALLS", "LEADS", "INIT", "DISC", "NCL"]:
             empty_df = create_empty_sheet_with_headers(sheet_name)
             _write_ws_by_name(sheet_name, empty_df)
+        
+        # Clear file uploader session state to reset the displayed file names
+        file_uploader_keys = [
+            "zoom_calls_uploader", "up_leads_pncs", "up_initial", 
+            "up_discovery", "up_ncl"
+        ]
+        for key in file_uploader_keys:
+            if key in st.session_state:
+                del st.session_state[key]
+        
         st.success("Master reset completed - all data cleared from all sheets (headers preserved)")
         return True
     except Exception as e:
@@ -557,98 +567,93 @@ def render_admin_sidebar():
                     else:              st.session_state.get("hashes_conv", set()).clear()
                     st.session_state["gs_ver"] += 1; st.rerun()
 
+        # Consolidated Data Management Section
+        st.divider()
+        st.subheader("🗑️ Data Management")
+        st.caption("Manage data across all sheets and batches.")
+        
+        # Master Reset (All Sheets)
         with st.container(border=True):
-            st.markdown("**🗑️ Wipe ALL Sheets**")
-            st.caption("Deletes every row in ALL sheets at once. Use with extreme care.")
-            confirm_wipe_all = st.checkbox("I understand this will delete ALL data from ALL sheets.", key="confirm_wipe_all")
-            if st.button("🗑️ Wipe ALL Sheets", disabled=not confirm_wipe_all, use_container_width=True):
-                success_count = 0
-                total_sheets = 5
-                for sheet_key in ["CALLS", "LEADS", "INIT", "DISC", "NCL"]:
-                    if _wipe_all(sheet_key):
-                        success_count += 1
-                
-                if success_count == total_sheets:
-                    st.success(f"Successfully wiped all {total_sheets} sheets!")
+            st.markdown("**🗑️ Master Reset (All Sheets)**")
+            st.caption("Complete reset - removes all data from ALL sheets but preserves headers")
+            confirm_master_reset = st.checkbox("I understand this will delete ALL data from ALL sheets", key="confirm_master_reset")
+            if st.button("🗑️ Master Reset", disabled=not confirm_master_reset, use_container_width=True):
+                if master_reset():
                     st.session_state.get("hashes_calls", set()).clear()
                     st.session_state.get("hashes_conv", set()).clear()
                     st.session_state["gs_ver"] += 1
                     st.rerun()
-                else:
-                    st.error(f"Wipe failed for {total_sheets - success_count} sheets. Only {success_count}/{total_sheets} sheets cleared.")
-
-        # Enhanced Batch Management Section
-        st.divider()
-        st.subheader("📦 Batch Management")
-        st.caption("Manage data by batch ID for precise control.")
         
-        # Get available batches for this sheet
-        available_batches = get_available_batches(key)
-        
-        if available_batches:
-            st.markdown(f"**Available batches in '{sel_label}':**")
-            for batch in available_batches:
-                st.code(batch, language=None)
+        # Batch Management
+        with st.container(border=True):
+            st.markdown("**📦 Batch Management**")
+            st.caption("Manage data by batch ID for precise control.")
             
-            # Batch removal
-            selected_batch = st.selectbox(
-                "Select batch to remove",
-                available_batches,
-                key=f"batch_remove_{key}"
+            # Get available batches for this sheet
+            available_batches = get_available_batches(key)
+            
+            if available_batches:
+                st.markdown(f"**Available batches in '{sel_label}':**")
+                for batch in available_batches:
+                    st.code(batch, language=None)
+                
+                # Batch removal
+                selected_batch = st.selectbox(
+                    "Select batch to remove",
+                    available_batches,
+                    key=f"batch_remove_{key}"
+                )
+                
+                if st.button(f"🗑️ Remove Batch '{selected_batch}'", use_container_width=True):
+                    if remove_batch_from_sheet(key, selected_batch):
+                        st.session_state["gs_ver"] += 1
+                        st.rerun()
+            else:
+                st.info(f"No batches found in '{sel_label}' (or no batch metadata)")
+            
+            # Batch statistics
+            if st.button("📊 Show Batch Statistics", use_container_width=True):
+                df = _read_ws_by_name(key)
+                if df is not None and not df.empty and "__batch_id" in df.columns:
+                    batch_stats = df["__batch_id"].value_counts()
+                    st.markdown("**Batch Statistics:**")
+                    for batch_id, count in batch_stats.items():
+                        st.write(f"• **{batch_id}**: {count} records")
+                else:
+                    st.warning("No batch metadata found in this sheet")
+            
+            # Clean up orphaned records
+            st.divider()
+            st.markdown("**🧹 Clean Up Orphaned Records**")
+            st.caption("Assign batch ID to records that don't have one")
+            
+            orphaned_batch_id = st.text_input(
+                "Batch ID for orphaned records",
+                value="legacy_data",
+                key=f"orphaned_batch_{key}",
+                help="Enter a batch ID to assign to records without one"
             )
             
-            if st.button(f"🗑️ Remove Batch '{selected_batch}'", use_container_width=True):
-                if remove_batch_from_sheet(key, selected_batch):
+            if st.button("🏷️ Assign Batch to Orphaned Records", use_container_width=True):
+                if assign_batch_to_orphaned_records(key, orphaned_batch_id):
                     st.session_state["gs_ver"] += 1
                     st.rerun()
-        else:
-            st.info(f"No batches found in '{sel_label}' (or no batch metadata)")
         
-        # Batch statistics
-        if st.button("📊 Show Batch Statistics", use_container_width=True):
-            df = _read_ws_by_name(key)
-            if df is not None and not df.empty and "__batch_id" in df.columns:
-                batch_stats = df["__batch_id"].value_counts()
-                st.markdown("**Batch Statistics:**")
-                for batch_id, count in batch_stats.items():
-                    st.write(f"• **{batch_id}**: {count} records")
-            else:
-                st.warning("No batch metadata found in this sheet")
-        
-        # Clean up orphaned records
-        st.divider()
-        st.markdown("**🧹 Clean Up Orphaned Records**")
-        st.caption("Assign batch ID to records that don't have one")
-        
-        orphaned_batch_id = st.text_input(
-            "Batch ID for orphaned records",
-            value="legacy_data",
-            key=f"orphaned_batch_{key}",
-            help="Enter a batch ID to assign to records without one"
-        )
-        
-        if st.button("🏷️ Assign Batch to Orphaned Records", use_container_width=True):
-            if assign_batch_to_orphaned_records(key, orphaned_batch_id):
-                st.session_state["gs_ver"] += 1
+        # File Uploader Management
+        with st.container(border=True):
+            st.markdown("**🗂️ File Uploader Management**")
+            st.caption("Clear file uploader displays and session state.")
+            
+            if st.button("🗂️ Clear File Displays", use_container_width=True):
+                file_uploader_keys = [
+                    "zoom_calls_uploader", "up_leads_pncs", "up_initial", 
+                    "up_discovery", "up_ncl"
+                ]
+                for key in file_uploader_keys:
+                    if key in st.session_state:
+                        del st.session_state[key]
+                st.success("File uploader displays cleared")
                 st.rerun()
-    
-    # Add a button to fix all missing batch IDs
-    st.divider()
-    st.markdown("**🔧 Fix All Missing Batch IDs**")
-    st.caption("Assign batch ID to all records that don't have one")
-    
-    if st.button("🔧 Fix All Missing Batch IDs", use_container_width=True):
-        success_count = 0
-        for sheet_key in ["CALLS", "LEADS", "INIT", "DISC", "NCL"]:
-            if assign_batch_to_orphaned_records(sheet_key, "legacy_data"):
-                success_count += 1
-        
-        if success_count > 0:
-            st.success(f"Fixed batch IDs in {success_count} sheets")
-            st.session_state["gs_ver"] += 1
-            st.rerun()
-        else:
-            st.info("No missing batch IDs found")
 
 # Render it now
 render_admin_sidebar()
@@ -907,22 +912,12 @@ with st.expander("🧾 Data Upload & Management", expanded=st.session_state.get(
             for sheet_name in ["CALLS", "LEADS", "INIT", "DISC", "NCL"]:
                 sync_from_master_sheet(sheet_name)
     
+
+    
     # Display current batch ID
     st.info(f"**Current Batch ID:** {st.session_state['current_batch_id']}")
     
-    # Master reset section
-    st.markdown("### 🗑️ Master Reset (Use with caution)")
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        confirm_reset = st.checkbox("I understand this will delete ALL data from ALL sheets")
-    
-    with col2:
-        if st.button("🗑️ Master Reset", disabled=not confirm_reset, use_container_width=True):
-            if master_reset():
-                st.session_state["hashes_calls"].clear()
-                st.session_state["hashes_conv"].clear()
-                st.rerun()
+
     
     st.divider()
     
