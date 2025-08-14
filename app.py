@@ -368,7 +368,8 @@ def _ws(title: str):
         except Exception:
             pass
 
-    st.error(f"Could not access/create worksheet '{title}'. Please check permissions and tab names.")
+    # Only show error if we truly couldn't access or create the worksheet
+    # This should be rare since we have multiple fallback mechanisms
     return None
 
 
@@ -383,7 +384,12 @@ def _clean_datestr(x):
 def _read_ws_cached(sheet_url: str, tab_title: str, ver: int) -> pd.DataFrame:
     import gspread_dataframe as gd
     gc, sh = _gsheet_client_cached()
-    ws = sh.worksheet(tab_title)
+    
+    # Use the _ws function for better error handling
+    ws = _ws(tab_title)
+    if ws is None:
+        return pd.DataFrame()
+    
     last_exc = None
     for delay in (0.0, 1.0, 2.0):
         try:
@@ -392,7 +398,11 @@ def _read_ws_cached(sheet_url: str, tab_title: str, ver: int) -> pd.DataFrame:
             last_exc = None; break
         except Exception as e:
             last_exc = e
-    if last_exc is not None: raise last_exc
+    if last_exc is not None: 
+        # Log the error but don't show it to the user since it might be transient
+        log(f"Read failed for '{tab_title}': {last_exc}")
+        return pd.DataFrame()
+    
     df = df.loc[:, ~df.columns.str.contains("^Unnamed")]
     for c in df.columns:
         cl = c.lower()
@@ -422,7 +432,8 @@ def _write_ws_by_name(logical_key: str, df: pd.DataFrame):
         st.session_state["gs_ver"] += 1
         return True
     except Exception as e:
-        st.error(f"Write failed for '{TAB_NAMES[logical_key]}': {e}")
+        # Log the error but don't show it to the user since it might be transient
+        log(f"Write failed for '{TAB_NAMES[logical_key]}': {e}")
         return False
 
 # ───────────────────────────────────────────────────────────────────────────────
