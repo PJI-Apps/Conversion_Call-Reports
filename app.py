@@ -80,6 +80,79 @@ if "logs" not in st.session_state:
 def log(msg: str): st.session_state["logs"].append(msg)
 
 # ───────────────────────────────────────────────────────────────────────────────
+# Batch Management Functions (Global)
+# ───────────────────────────────────────────────────────────────────────────────
+def generate_batch_id() -> str:
+    """Generate a unique batch ID with timestamp and random component"""
+    return f"batch_{int(time.time())}_{random.randint(1000, 9999)}"
+
+def add_batch_metadata(df: pd.DataFrame, batch_id: str, upload_date: date, start_date: date, end_date: date) -> pd.DataFrame:
+    """Add batch metadata to dataframe"""
+    df = df.copy()
+    df["__batch_id"] = batch_id
+    df["__upload_date"] = upload_date
+    df["__batch_start"] = start_date
+    df["__batch_end"] = end_date
+    df["__upload_timestamp"] = datetime.now().isoformat()
+    return df
+
+def remove_batch_from_sheet(sheet_name: str, batch_id: str) -> bool:
+    """Remove all records with specific batch ID from a sheet"""
+    try:
+        current_data = _read_ws_by_name(sheet_name)
+        if current_data is None or current_data.empty:
+            return True
+        
+        # Remove records with matching batch ID
+        filtered_data = current_data[current_data["__batch_id"] != batch_id].copy()
+        
+        # Write back the filtered data
+        _write_ws_by_name(sheet_name, filtered_data)
+        
+        removed_count = len(current_data) - len(filtered_data)
+        st.success(f"Removed {removed_count} records with batch ID '{batch_id}' from {sheet_name}")
+        return True
+    except Exception as e:
+        st.error(f"Failed to remove batch from {sheet_name}: {str(e)}")
+        return False
+
+def get_available_batches(sheet_name: str) -> List[str]:
+    """Get list of available batch IDs for a sheet"""
+    try:
+        current_data = _read_ws_by_name(sheet_name)
+        if current_data is None or current_data.empty or "__batch_id" not in current_data.columns:
+            return []
+        
+        return sorted(current_data["__batch_id"].unique().tolist())
+    except Exception:
+        return []
+
+def sync_from_master_sheet(sheet_name: str) -> bool:
+    """Sync data from master sheet (refresh after manual edits)"""
+    try:
+        current_data = _read_ws_by_name(sheet_name)
+        if current_data is not None and not current_data.empty:
+            st.success(f"Successfully synced {len(current_data)} records from {sheet_name}")
+            return True
+        else:
+            st.warning(f"No data found in {sheet_name}")
+            return False
+    except Exception as e:
+        st.error(f"Failed to sync from {sheet_name}: {str(e)}")
+        return False
+
+def master_reset() -> bool:
+    """Complete master reset - removes all data from all sheets"""
+    try:
+        for sheet_name in ["CALLS", "LEADS", "INIT", "DISC", "NCL"]:
+            _write_ws_by_name(sheet_name, pd.DataFrame())
+        st.success("Master reset completed - all data cleared from all sheets")
+        return True
+    except Exception as e:
+        st.error(f"Master reset failed: {str(e)}")
+        return False
+
+# ───────────────────────────────────────────────────────────────────────────────
 # Google Sheets master + caching
 # ───────────────────────────────────────────────────────────────────────────────
 TAB_NAMES = {
@@ -633,77 +706,6 @@ if "current_batch_id" not in st.session_state:
 
 if "upload_history" not in st.session_state:
     st.session_state["upload_history"] = {}
-
-# Batch management functions
-def generate_batch_id() -> str:
-    """Generate a unique batch ID with timestamp and random component"""
-    return f"batch_{int(time.time())}_{random.randint(1000, 9999)}"
-
-def add_batch_metadata(df: pd.DataFrame, batch_id: str, upload_date: date, start_date: date, end_date: date) -> pd.DataFrame:
-    """Add batch metadata to dataframe"""
-    df = df.copy()
-    df["__batch_id"] = batch_id
-    df["__upload_date"] = upload_date
-    df["__batch_start"] = start_date
-    df["__batch_end"] = end_date
-    df["__upload_timestamp"] = datetime.now().isoformat()
-    return df
-
-def remove_batch_from_sheet(sheet_name: str, batch_id: str) -> bool:
-    """Remove all records with specific batch ID from a sheet"""
-    try:
-        current_data = _read_ws_by_name(sheet_name)
-        if current_data is None or current_data.empty:
-            return True
-        
-        # Remove records with matching batch ID
-        filtered_data = current_data[current_data["__batch_id"] != batch_id].copy()
-        
-        # Write back the filtered data
-        _write_ws_by_name(sheet_name, filtered_data)
-        
-        removed_count = len(current_data) - len(filtered_data)
-        st.success(f"Removed {removed_count} records with batch ID '{batch_id}' from {sheet_name}")
-        return True
-    except Exception as e:
-        st.error(f"Failed to remove batch from {sheet_name}: {str(e)}")
-        return False
-
-def get_available_batches(sheet_name: str) -> List[str]:
-    """Get list of available batch IDs for a sheet"""
-    try:
-        current_data = _read_ws_by_name(sheet_name)
-        if current_data is None or current_data.empty or "__batch_id" not in current_data.columns:
-            return []
-        
-        return sorted(current_data["__batch_id"].unique().tolist())
-    except Exception:
-        return []
-
-def sync_from_master_sheet(sheet_name: str) -> bool:
-    """Sync data from master sheet (refresh after manual edits)"""
-    try:
-        current_data = _read_ws_by_name(sheet_name)
-        if current_data is not None and not current_data.empty:
-            st.success(f"Successfully synced {len(current_data)} records from {sheet_name}")
-            return True
-        else:
-            st.warning(f"No data found in {sheet_name}")
-            return False
-    except Exception as e:
-        st.error(f"Failed to sync from {sheet_name}: {str(e)}")
-        return False
-
-def master_reset() -> bool:
-    """Complete master reset - removes all data from all sheets"""
-    try:
-        for sheet_name in ["CALLS", "LEADS", "INIT", "DISC", "NCL"]:
-            _write_ws_by_name(sheet_name, pd.DataFrame())
-        st.success("Master reset completed - all data cleared from all sheets")
-        return True
-    except Exception as e:
-        st.error(f"Master reset failed: {str(e)}")
-        return False
 
 # Upload section with enhanced batch management
 def upload_section(section_id: str, title: str, expander_flag: str) -> Tuple[str, object]:
