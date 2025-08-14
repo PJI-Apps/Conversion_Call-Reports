@@ -212,6 +212,8 @@ def master_reset() -> bool:
         for key in file_uploader_keys:
             if key in st.session_state:
                 del st.session_state[key]
+            # Also set to None to ensure the widget display is cleared
+            st.session_state[key] = None
         
         st.success("Master reset completed - all data cleared from all sheets (headers preserved)")
         return True
@@ -645,14 +647,29 @@ def render_admin_sidebar():
             st.caption("Clear file uploader displays and session state.")
             
             if st.button("🗂️ Clear File Displays", use_container_width=True):
+                # Clear all file uploader session state keys
                 file_uploader_keys = [
                     "zoom_calls_uploader", "up_leads_pncs", "up_initial", 
                     "up_discovery", "up_ncl"
                 ]
-                for key in file_uploader_keys:
+                
+                # Also clear any related session state keys that might persist file uploader state
+                additional_keys = [
+                    "hashes_calls", "hashes_conv", "upload_history"
+                ]
+                
+                cleared_keys = []
+                for key in file_uploader_keys + additional_keys:
                     if key in st.session_state:
                         del st.session_state[key]
-                st.success("File uploader displays cleared")
+                        cleared_keys.append(key)
+                
+                # Also try setting file uploader keys to None (sometimes this works better)
+                for key in file_uploader_keys:
+                    st.session_state[key] = None
+                
+                # Force a rerun to refresh the UI
+                st.success(f"File uploader displays cleared. Cleared keys: {', '.join(cleared_keys)}")
                 st.rerun()
 
 # Render it now
