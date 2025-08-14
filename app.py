@@ -164,8 +164,12 @@ def assign_batch_to_orphaned_records(sheet_name: str, batch_id: str) -> bool:
         if "__batch_id" not in current_data.columns:
             current_data["__batch_id"] = ""
         
-        # Find records without batch ID
-        orphaned_mask = current_data["__batch_id"].isna() | (current_data["__batch_id"] == "")
+        # Find records without batch ID (handle both string and datetime formats)
+        batch_col = current_data["__batch_id"]
+        # Convert datetime objects back to strings for comparison
+        batch_col_str = batch_col.astype(str)
+        orphaned_mask = (batch_col.isna() | (batch_col_str == "") | 
+                        (batch_col_str == "NaT") | (batch_col_str.str.contains("2025-08-14 0:00:00")))
         orphaned_count = orphaned_mask.sum()
         
         if orphaned_count == 0:
@@ -325,7 +329,8 @@ def _read_ws_cached(sheet_url: str, tab_title: str, ver: int) -> pd.DataFrame:
     df = df.loc[:, ~df.columns.str.contains("^Unnamed")]
     for c in df.columns:
         cl = c.lower()
-        if "date" in cl or "with pji law" in cl or "batch" in cl:
+        # Only convert actual date columns, not batch metadata columns
+        if ("date" in cl or "with pji law" in cl) and not cl.startswith("__batch"):
             df[c] = pd.to_datetime(df[c].map(_clean_datestr), errors="coerce", format="mixed")
     return df.dropna(how="all").fillna("")
 
