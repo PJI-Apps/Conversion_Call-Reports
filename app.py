@@ -9,6 +9,9 @@ import datetime as dt
 from datetime import date, timedelta
 from calendar import monthrange
 from typing import List, Dict, Tuple, Optional
+import time
+import random
+import uuid
 
 import pandas as pd
 import streamlit as st
@@ -386,6 +389,44 @@ def render_admin_sidebar():
                     else:              st.session_state.get("hashes_conv", set()).clear()
                     st.session_state["gs_ver"] += 1; st.rerun()
 
+        # Enhanced Batch Management Section
+        st.divider()
+        st.subheader("📦 Batch Management")
+        st.caption("Manage data by batch ID for precise control.")
+        
+        # Get available batches for this sheet
+        available_batches = get_available_batches(key)
+        
+        if available_batches:
+            st.markdown(f"**Available batches in '{sel_label}':**")
+            for batch in available_batches:
+                st.code(batch, language=None)
+            
+            # Batch removal
+            selected_batch = st.selectbox(
+                "Select batch to remove",
+                available_batches,
+                key=f"batch_remove_{key}"
+            )
+            
+            if st.button(f"🗑️ Remove Batch '{selected_batch}'", use_container_width=True):
+                if remove_batch_from_sheet(key, selected_batch):
+                    st.session_state["gs_ver"] += 1
+                    st.rerun()
+        else:
+            st.info(f"No batches found in '{sel_label}' (or no batch metadata)")
+        
+        # Batch statistics
+        if st.button("📊 Show Batch Statistics", use_container_width=True):
+            df = _read_ws_by_name(key)
+            if df is not None and not df.empty and "__batch_id" in df.columns:
+                batch_stats = df["__batch_id"].value_counts()
+                st.markdown("**Batch Statistics:**")
+                for batch_id, count in batch_stats.items():
+                    st.write(f"• **{batch_id}**: {count} records")
+            else:
+                st.warning("No batch metadata found in this sheet")
+
 # Render it now
 render_admin_sidebar()
 
@@ -583,8 +624,88 @@ def _mask_by_range_dates(df: pd.DataFrame, date_col: str, start: date, end: date
     return in_range
 
 # ───────────────────────────────────────────────────────────────────────────────
-# Data Upload (Calls & Conversion)
+# Enhanced Data Upload & Management System
 # ───────────────────────────────────────────────────────────────────────────────
+
+# Initialize batch management
+if "current_batch_id" not in st.session_state:
+    st.session_state["current_batch_id"] = f"batch_{int(time.time())}_{random.randint(1000, 9999)}"
+
+if "upload_history" not in st.session_state:
+    st.session_state["upload_history"] = {}
+
+# Batch management functions
+def generate_batch_id() -> str:
+    """Generate a unique batch ID with timestamp and random component"""
+    return f"batch_{int(time.time())}_{random.randint(1000, 9999)}"
+
+def add_batch_metadata(df: pd.DataFrame, batch_id: str, upload_date: date, start_date: date, end_date: date) -> pd.DataFrame:
+    """Add batch metadata to dataframe"""
+    df = df.copy()
+    df["__batch_id"] = batch_id
+    df["__upload_date"] = upload_date
+    df["__batch_start"] = start_date
+    df["__batch_end"] = end_date
+    df["__upload_timestamp"] = datetime.now().isoformat()
+    return df
+
+def remove_batch_from_sheet(sheet_name: str, batch_id: str) -> bool:
+    """Remove all records with specific batch ID from a sheet"""
+    try:
+        current_data = _read_ws_by_name(sheet_name)
+        if current_data is None or current_data.empty:
+            return True
+        
+        # Remove records with matching batch ID
+        filtered_data = current_data[current_data["__batch_id"] != batch_id].copy()
+        
+        # Write back the filtered data
+        _write_ws_by_name(sheet_name, filtered_data)
+        
+        removed_count = len(current_data) - len(filtered_data)
+        st.success(f"Removed {removed_count} records with batch ID '{batch_id}' from {sheet_name}")
+        return True
+    except Exception as e:
+        st.error(f"Failed to remove batch from {sheet_name}: {str(e)}")
+        return False
+
+def get_available_batches(sheet_name: str) -> List[str]:
+    """Get list of available batch IDs for a sheet"""
+    try:
+        current_data = _read_ws_by_name(sheet_name)
+        if current_data is None or current_data.empty or "__batch_id" not in current_data.columns:
+            return []
+        
+        return sorted(current_data["__batch_id"].unique().tolist())
+    except Exception:
+        return []
+
+def sync_from_master_sheet(sheet_name: str) -> bool:
+    """Sync data from master sheet (refresh after manual edits)"""
+    try:
+        current_data = _read_ws_by_name(sheet_name)
+        if current_data is not None and not current_data.empty:
+            st.success(f"Successfully synced {len(current_data)} records from {sheet_name}")
+            return True
+        else:
+            st.warning(f"No data found in {sheet_name}")
+            return False
+    except Exception as e:
+        st.error(f"Failed to sync from {sheet_name}: {str(e)}")
+        return False
+
+def master_reset() -> bool:
+    """Complete master reset - removes all data from all sheets"""
+    try:
+        for sheet_name in ["CALLS", "LEADS", "INIT", "DISC", "NCL"]:
+            _write_ws_by_name(sheet_name, pd.DataFrame())
+        st.success("Master reset completed - all data cleared from all sheets")
+        return True
+    except Exception as e:
+        st.error(f"Master reset failed: {str(e)}")
+        return False
+
+# Upload section with enhanced batch management
 def upload_section(section_id: str, title: str, expander_flag: str) -> Tuple[str, object]:
     st.subheader(title)
     today = date.today()
@@ -609,15 +730,51 @@ def upload_section(section_id: str, title: str, expander_flag: str) -> Tuple[str
     st.divider()
     return period_key, uploaded
 
+# Initialize session state for upload tracking
 if "hashes_calls" not in st.session_state: st.session_state["hashes_calls"] = set()
 if "hashes_conv"  not in st.session_state: st.session_state["hashes_conv"]  = set()
 
-with st.expander("🧾 Data Upload (Calls & Conversion)", expanded=st.session_state.get("exp_upload_open", False)):
-    if st.button("Allow re-upload of the same files this session"):
-        st.session_state.get("hashes_calls", set()).clear()
-        st.session_state.get("hashes_conv", set()).clear()
-        st.caption("Ready — you can re-upload the same files now.")
-
+with st.expander("🧾 Data Upload & Management", expanded=st.session_state.get("exp_upload_open", False)):
+    # Batch management controls
+    st.markdown("### 📦 Batch Management")
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        if st.button("🔄 Generate New Batch ID", use_container_width=True):
+            st.session_state["current_batch_id"] = generate_batch_id()
+            st.success(f"New batch ID: {st.session_state['current_batch_id']}")
+    
+    with col2:
+        if st.button("🔄 Allow Re-upload", use_container_width=True):
+            st.session_state.get("hashes_calls", set()).clear()
+            st.session_state.get("hashes_conv", set()).clear()
+            st.success("Re-upload enabled - you can now upload the same files")
+    
+    with col3:
+        if st.button("🔄 Sync All Sheets", use_container_width=True):
+            for sheet_name in ["CALLS", "LEADS", "INIT", "DISC", "NCL"]:
+                sync_from_master_sheet(sheet_name)
+    
+    # Display current batch ID
+    st.info(f"**Current Batch ID:** {st.session_state['current_batch_id']}")
+    
+    # Master reset section
+    st.markdown("### 🗑️ Master Reset (Use with caution)")
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        confirm_reset = st.checkbox("I understand this will delete ALL data from ALL sheets")
+    
+    with col2:
+        if st.button("🗑️ Master Reset", disabled=not confirm_reset, use_container_width=True):
+            if master_reset():
+                st.session_state["hashes_calls"].clear()
+                st.session_state["hashes_conv"].clear()
+                st.rerun()
+    
+    st.divider()
+    
+    # File uploads
     calls_period_key, calls_uploader = upload_section("zoom_calls", "Zoom Calls", "exp_upload_open")
     force_replace_calls = st.checkbox("Replace this month in Calls if it already exists",
                                       key="force_calls_replace")
@@ -670,7 +827,7 @@ with st.expander("🧾 Data Upload (Calls & Conversion)", expanded=st.session_st
         df.columns = [str(c).strip() for c in df.columns]
         return df
 
-    # Calls processing
+    # Calls processing with enhanced batch management
     if calls_uploader:
         CALLS_MASTER_COLS = [
             "Category","Name","Total Calls","Completed Calls","Outgoing","Received",
@@ -679,43 +836,58 @@ with st.expander("🧾 Data Upload (Calls & Conversion)", expanded=st.session_st
         ]
         try:
             fhash = file_md5(calls_uploader)
-            month_exists = False
-            try:
-                existing = _read_ws_by_name("CALLS")
-                if isinstance(existing, pd.DataFrame) and not existing.empty:
-                    month_exists = existing["Month-Year"].astype(str).eq(calls_period_key).any()
-            except Exception as e:
-                log(f"Month existence check failed: {e}")
+            batch_id = st.session_state["current_batch_id"]
+            
+            # Check if this batch already exists
+            existing = _read_ws_by_name("CALLS")
+            batch_exists = False
+            if isinstance(existing, pd.DataFrame) and not existing.empty and "__batch_id" in existing.columns:
+                batch_exists = existing["__batch_id"].eq(batch_id).any()
 
-            if fhash in st.session_state["hashes_calls"] and month_exists and not force_replace_calls:
-                st.caption("Calls: same file and month already present — upload skipped.")
+            if fhash in st.session_state["hashes_calls"] and batch_exists and not force_replace_calls:
+                st.caption(f"Calls: same file and batch '{batch_id}' already present — upload skipped.")
                 log("Calls upload skipped by session dedupe guard.")
             else:
                 raw = pd.read_csv(calls_uploader)
                 processed = process_calls_csv(raw, calls_period_key)
                 processed_clean = processed[CALLS_MASTER_COLS].copy()
+                
+                # Add batch metadata
+                processed_clean = add_batch_metadata(
+                    processed_clean, 
+                    batch_id, 
+                    date.today(), 
+                    upload_start, 
+                    upload_end
+                )
 
                 if GSHEET is None:
                     st.warning("Master store not configured; Calls will not persist.")
                     df_calls_master = processed_clean.copy()
                 else:
                     current = _read_ws_by_name("CALLS")
-                    if force_replace_calls and month_exists and not current.empty:
-                        current = current.loc[current["Month-Year"].astype(str).str.strip() != calls_period_key].copy()
+                    
+                    # Remove existing batch if force replace
+                    if force_replace_calls and batch_exists and not current.empty:
+                        current = current[current["__batch_id"] != batch_id].copy()
+                    
                     combined = (pd.concat([current, processed_clean], ignore_index=True)
                                 if not current.empty else processed_clean.copy())
+                    
+                    # Dedupe by Month-Year + Name + Category (keeping latest batch)
                     key = (combined["Month-Year"].astype(str).str.strip() + "|" +
                            combined["Name"].astype(str).str.strip() + "|" +
                            combined["Category"].astype(str).str.strip())
                     combined = combined.loc[~key.duplicated(keep="last")].copy()
+                    
                     _write_ws_by_name("CALLS", combined)
-                    st.success(f"Calls: upserted {len(processed_clean)} row(s).")
+                    st.success(f"Calls: upserted {len(processed_clean)} row(s) with batch ID '{batch_id}'.")
                     df_calls_master = combined.copy()
                 st.session_state["hashes_calls"].add(fhash)
         except Exception as e:
             st.error("Could not parse Calls CSV."); st.exception(e)
 
-    # Conversion processing uploads
+    # Conversion processing uploads with enhanced batch management
     uploads = {"LEADS": (up_leads, replace_leads),
                "INIT":  (up_init,  replace_init),
                "DISC":  (up_disc,  replace_disc),
@@ -729,8 +901,16 @@ with st.expander("🧾 Data Upload (Calls & Conversion)", expanded=st.session_st
         if not upl: continue
         try:
             fhash = file_md5(upl)
-            if fhash in st.session_state["hashes_conv"]:
-                st.caption(f"{key_name}: duplicate file — ignored.")
+            batch_id = st.session_state["current_batch_id"]
+            
+            # Check if this batch already exists
+            existing = _read_ws_by_name(key_name)
+            batch_exists = False
+            if isinstance(existing, pd.DataFrame) and not existing.empty and "__batch_id" in existing.columns:
+                batch_exists = existing["__batch_id"].eq(batch_id).any()
+
+            if fhash in st.session_state["hashes_conv"] and batch_exists and not want_replace:
+                st.caption(f"{key_name}: duplicate file and batch '{batch_id}' already present — ignored.")
                 log(f"{key_name} skipped by session dedupe guard.")
                 continue
 
@@ -738,9 +918,8 @@ with st.expander("🧾 Data Upload (Calls & Conversion)", expanded=st.session_st
             if df_up is None or df_up.empty:
                 st.caption(f"{key_name}: file appears empty."); continue
 
-            if key_name == "LEADS":
-                df_up["__batch_start"] = pd.to_datetime(upload_start)
-                df_up["__batch_end"]   = pd.to_datetime(upload_end)
+            # Add batch metadata to all conversion files
+            df_up = add_batch_metadata(df_up, batch_id, date.today(), upload_start, upload_end)
 
             if key_name == "NCL" and "Retained with Consult (Y/N)" in df_up.columns \
                and "Retained With Consult (Y/N)" not in df_up.columns:
@@ -748,8 +927,10 @@ with st.expander("🧾 Data Upload (Calls & Conversion)", expanded=st.session_st
 
             current = _read_ws_by_name(key_name)
 
+            # Handle replacement logic with batch awareness
             if want_replace and not current.empty:
                 if key_name == "LEADS":
+                    # For Leads, remove records that match the incoming data exactly
                     key_in = (
                         df_up.get("Email","").astype(str).str.strip() + "|" +
                         df_up.get("Matter ID","").astype(str).str.strip() + "|" +
@@ -767,25 +948,14 @@ with st.expander("🧾 Data Upload (Calls & Conversion)", expanded=st.session_st
                     )
                     mask_keep = ~key_cur.isin(incoming_keys)
                     current = current.loc[mask_keep].copy()
-                elif key_name == "INIT":
-                    col = "Initial Consultation With Pji Law"
-                    if col in current.columns:
-                        drop_mask = _mask_by_range(current, col)
-                        current = current.loc[~drop_mask].copy()
-                elif key_name == "DISC":
-                    col = "Discovery Meeting With Pji Law"
-                    if col in current.columns:
-                        drop_mask = _mask_by_range(current, col)
-                        current = current.loc[~drop_mask].copy()
-                elif key_name == "NCL":
-                    col = "Date we had BOTH the signed CLA and full payment"
-                    if col in current.columns:
-                        drop_mask = _mask_by_range(current, col)
-                        current = current.loc[~drop_mask].copy()
+                else:
+                    # For other files, remove existing batch if it exists
+                    if batch_exists:
+                        current = current[current["__batch_id"] != batch_id].copy()
 
             combined = pd.concat([current, df_up], ignore_index=True) if not current.empty else df_up.copy()
 
-            # Dedupe by dataset keys
+            # Dedupe by dataset keys (keeping latest batch)
             if key_name == "LEADS":
                 k = (combined.get("Email","").astype(str).str.strip() + "|" +
                      combined.get("Matter ID","").astype(str).str.strip() + "|" +
@@ -810,7 +980,7 @@ with st.expander("🧾 Data Upload (Calls & Conversion)", expanded=st.session_st
 
             combined = combined.loc[~k.duplicated(keep="last")].copy()
             _write_ws_by_name(key_name, combined)
-            st.success(f"{key_name}: upserted {len(df_up)} row(s).")
+            st.success(f"{key_name}: upserted {len(df_up)} row(s) with batch ID '{batch_id}'.")
             st.session_state["hashes_conv"].add(fhash)
         except Exception as e:
             st.error(f"{key_name}: upload failed."); st.exception(e)
