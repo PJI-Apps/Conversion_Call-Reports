@@ -80,11 +80,14 @@ if "logs" not in st.session_state:
 def log(msg: str): st.session_state["logs"].append(msg)
 
 # ───────────────────────────────────────────────────────────────────────────────
-# Batch Management Functions (Global)
+# Batch Management Functions
 # ───────────────────────────────────────────────────────────────────────────────
+
 def generate_batch_id() -> str:
     """Generate a unique batch ID with timestamp and random component"""
-    return f"batch_{int(time.time())}_{random.randint(1000, 9999)}"
+    timestamp = int(time.time())
+    random_suffix = random.randint(1000, 9999)
+    return f"batch_{timestamp}_{random_suffix}"
 
 def add_batch_metadata(df: pd.DataFrame, batch_id: str, upload_date: date, start_date: date, end_date: date) -> pd.DataFrame:
     """Add batch metadata to dataframe"""
@@ -141,12 +144,66 @@ def sync_from_master_sheet(sheet_name: str) -> bool:
         st.error(f"Failed to sync from {sheet_name}: {str(e)}")
         return False
 
+def create_empty_sheet_with_headers(sheet_name: str) -> pd.DataFrame:
+    """Create an empty DataFrame with proper headers for each sheet type"""
+    if sheet_name == "CALLS":
+        # Zoom Calls headers
+        headers = [
+            "Name", "Total Calls", "Completed Calls", "Outgoing", "Received", 
+            "Forwarded to Voicemail", "Answered by Other", "Missed", 
+            "Avg Call Time", "Total Call Time", "Total Hold Time", "Month-Year",
+            "__batch_id", "__upload_date", "__batch_start", "__batch_end", "__upload_timestamp"
+        ]
+    elif sheet_name == "LEADS":
+        # Leads_PNCs headers
+        headers = [
+            "First Name", "Last Name", "Email", "Stage", "Assigned Intake Specialist", 
+            "Status", "Sub Status", "Matter ID", "Reason for Rescheduling", 
+            "No Follow Up (Reason)", "Refer Out?", "Lead Attorney", 
+            "Initial Consultation With Pji Law", "Initial Consultation Rescheduled With Pji Law", 
+            "Discovery Meeting Rescheduled With Pji Law", "Discovery Meeting With Pji Law", 
+            "Practice Area",
+            "__batch_id", "__upload_date", "__batch_start", "__batch_end", "__upload_timestamp"
+        ]
+    elif sheet_name == "INIT":
+        # Initial Consultation headers
+        headers = [
+            "First Name", "Last Name", "Email", "Matter ID", "Assigned Intake Specialist", 
+            "Sub Status", "Reason for Rescheduling", "Initial Consultation With Pji Law", 
+            "Initial Consultation Rescheduled With Pji Law", "Practice Area", "Lead Attorney", 
+            "Status", "Reason", "Initial Consultation With Pji Law",
+            "__batch_id", "__upload_date", "__batch_start", "__batch_end", "__upload_timestamp"
+        ]
+    elif sheet_name == "DISC":
+        # Discovery Meeting headers
+        headers = [
+            "First Name", "Last Name", "Email", "Matter ID", "Assigned Intake Specialist", 
+            "Sub Status", "Reason for Rescheduling", "Discovery Meeting With Pji Law", 
+            "Discovery Meeting Rescheduled With Pji Law", "Practice Area", "Lead Attorney", 
+            "Status", "Reason", "Discovery Meeting With Pji Law",
+            "__batch_id", "__upload_date", "__batch_start", "__batch_end", "__upload_timestamp"
+        ]
+    elif sheet_name == "NCL":
+        # New Client List headers
+        headers = [
+            "First Name", "Last Name", "Email", "Matter ID", "Practice Area", 
+            "Initial Consultation With Pji Law", "Date we had BOTH the signed CLA and full payment", 
+            "Lead Attorney", "Primary Intake?",
+            "__batch_id", "__upload_date", "__batch_start", "__batch_end", "__upload_timestamp"
+        ]
+    else:
+        # Fallback - empty DataFrame
+        return pd.DataFrame()
+    
+    return pd.DataFrame(columns=headers)
+
 def master_reset() -> bool:
-    """Complete master reset - removes all data from all sheets"""
+    """Complete master reset - removes all data from all sheets but preserves headers"""
     try:
         for sheet_name in ["CALLS", "LEADS", "INIT", "DISC", "NCL"]:
-            _write_ws_by_name(sheet_name, pd.DataFrame())
-        st.success("Master reset completed - all data cleared from all sheets")
+            empty_df = create_empty_sheet_with_headers(sheet_name)
+            _write_ws_by_name(sheet_name, empty_df)
+        st.success("Master reset completed - all data cleared from all sheets (headers preserved)")
         return True
     except Exception as e:
         st.error(f"Master reset failed: {str(e)}")
@@ -169,7 +226,7 @@ def assign_batch_to_orphaned_records(sheet_name: str, batch_id: str) -> bool:
         # Convert datetime objects back to strings for comparison
         batch_col_str = batch_col.astype(str)
         orphaned_mask = (batch_col.isna() | (batch_col_str == "") | 
-                        (batch_col_str == "NaT") | (batch_col_str.str.contains("2025-08-14 0:00:00")))
+                        (batch_col_str == "NaT") | (batch_col_str.str.contains("0:00:00"))) # Specific check for datetime format
         orphaned_count = orphaned_mask.sum()
         
         if orphaned_count == 0:
@@ -424,7 +481,8 @@ def render_admin_sidebar():
             return ok, removed
 
         def _wipe_all(logical_key: str) -> bool:
-            return _write_ws_by_name(logical_key, pd.DataFrame())
+            empty_df = create_empty_sheet_with_headers(logical_key)
+            return _write_ws_by_name(logical_key, empty_df)
 
         def _dedupe_sheet(logical_key: str) -> tuple[bool, int]:
             df = _read_ws_by_name(logical_key)
