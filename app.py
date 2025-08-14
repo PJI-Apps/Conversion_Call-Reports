@@ -968,7 +968,9 @@ with st.expander("📞 Calls Report", expanded=False):
 st.markdown("---")
 st.header("📊 Conversion Report")
 
-with st.expander("📊 Firm Conversion Report", expanded=False):
+st.header("📊 Firm Conversion Report")
+
+with st.expander("📅 Filter", expanded=False):
     row = st.columns([2, 1, 1])  # Period (wide), Year, Month
 
     months_map_names = {
@@ -1206,7 +1208,8 @@ html_table = """
   </tbody>
 </table>
 """
-st.markdown(html_table, unsafe_allow_html=True)
+with st.expander("📊 Summary", expanded=False):
+    st.markdown(html_table, unsafe_allow_html=True)
 
 with st.expander("📊 Practice Area", expanded=False):
     st.subheader("Practice Area")
@@ -1511,8 +1514,7 @@ for pa in ["Estate Planning","Estate Administration","Civil Litigation","Busines
                 float(rowx["% of PNCs who met and retained"]),
             )
 
-with st.expander("📊 Conversion Report: Intake", expanded=False):
-    st.header("Conversion Report: Intake")
+st.header("📊 Conversion Report: Intake")
 
 # ───────────────────────────────────────────────────────────────────────────────
 # Intake Specialist Report
@@ -1861,70 +1863,72 @@ for specialist in intake_specialists:
     }
 
 # --- Render intake report ---
-intake_specialists_display = ["ALL"] + intake_specialists
-selected_intake = st.selectbox("Select Intake Specialist", intake_specialists_display, key="intake_specialist_pick")
+with st.expander("📅 Filter", expanded=False):
+    intake_specialists_display = ["ALL"] + intake_specialists
+    selected_intake = st.selectbox("Select Intake Specialist", intake_specialists_display, key="intake_specialist_pick")
 
-if selected_intake == "ALL":
-    # Show summary for all specialists (sum of all metrics)
-    st.subheader("Intake Summary - All Specialists Combined")
-    
-    # Calculate sums across all specialists
-    total_pncs_intake = sum(data["PNCs did intake"] for data in intake_results.values())
-    total_retained_without = sum(data["Retained without consult"] for data in intake_results.values())
-    total_scheduled = sum(data["Scheduled consult"] for data in intake_results.values())
-    total_showed_up = sum(data["Showed up"] for data in intake_results.values())
-    total_retained_after = sum(data["Retained after consult"] for data in intake_results.values())
-    total_retained = sum(data["Total retained"] for data in intake_results.values())
-    
-    # Calculate percentages for ALL
-    all_pct_total = _pct(total_pncs_intake, total_pncs) if total_pncs > 0 else 0
-    all_pct_remaining_scheduled = _pct(total_scheduled, (total_pncs_intake - total_retained_without)) if (total_pncs_intake - total_retained_without) > 0 else 0
-    all_pct_showed_up = _pct(total_showed_up, total_scheduled) if total_scheduled > 0 else 0
-    all_pct_retained_after = _pct(total_retained_after, total_scheduled) if total_scheduled > 0 else 0
-    all_pct_total_retained = _pct(total_retained, total_pncs_intake) if total_pncs_intake > 0 else 0
-    
-    # Create summary table with summed metrics
-    all_summary_rows = [
-        ("Total PNCs all intake specialists did intake", str(total_pncs_intake)),
-        ("% of total PNCs received all intake specialists did intake", f"{int(round(all_pct_total))}%"),
-        ("Total PNCs who retained without consultation", str(total_retained_without)),
-        ("Total PNCs who scheduled consultation", str(total_scheduled)),
-        ("% of remaining PNCs who scheduled consult", f"{int(round(all_pct_remaining_scheduled))}%"),
-        ("Total PNCs who showed up for consultation", str(total_showed_up)),
-        ("% of PNCs who showed up for consultation", f"{int(round(all_pct_showed_up))}%"),
-        ("Total PNCs retained after scheduled consultation", str(total_retained_after)),
-        ("% of PNCs who retained after scheduled consult", f"{int(round(all_pct_retained_after))}%"),
-        ("All intake specialists' total PNCs who retained", str(total_retained)),
-        ("% of total PNCs received who retained", f"{int(round(all_pct_total_retained))}%"),
-    ]
-    
-    all_summary_df = pd.DataFrame(all_summary_rows, columns=["Metric", "Value"])
-    st.dataframe(all_summary_df, use_container_width=True, hide_index=True)
-    
-else:
-    # Show detailed metrics for selected specialist in row format like practice area
-    st.subheader(f"Intake Metrics - {selected_intake}")
-    
-    data = intake_results[selected_intake]
-    
-    # Create row-based table like practice area section with personalized labels
-    intake_rows = [
-        (f"PNCs {selected_intake} did intake", str(data["PNCs did intake"])),
-        (f"% of total PNCs received {selected_intake} did intake", f"{int(round(data['% of total PNCs']))}%"),
-        (f"PNCs who retained without consultation", str(data["Retained without consult"])),
-        (f"PNCs who scheduled consultation", str(data["Scheduled consult"])),
-        (f"% of remaining PNCs who scheduled consult", f"{int(round(data['% remaining scheduled']))}%"),
-        (f"PNCs who showed up for consultation", str(data["Showed up"])),
-        (f"% of PNCs who showed up for consultation", f"{int(round(data['% showed up']))}%"),
-        (f"PNCs retained after scheduled consultation", str(data["Retained after consult"])),
-        (f"% of PNCs who retained after scheduled consult", f"{int(round(data['% retained after consult']))}%"),
-        (f"{selected_intake}'s total PNCs who retained", str(data["Total retained"])),
-        (f"% of total PNCs received who retained", f"{int(round(data['% total retained']))}%"),
-    ]
-    
-    # Create DataFrame for display
-    intake_df = pd.DataFrame(intake_rows, columns=["Metric", "Value"])
-    st.dataframe(intake_df, use_container_width=True, hide_index=True)
+with st.expander("📊 Summary", expanded=False):
+    if selected_intake == "ALL":
+        # Show summary for all specialists (sum of all metrics)
+        st.subheader("Intake Summary - All Specialists Combined")
+        
+        # Calculate sums across all specialists
+        total_pncs_intake = sum(data["PNCs did intake"] for data in intake_results.values())
+        total_retained_without = sum(data["Retained without consult"] for data in intake_results.values())
+        total_scheduled = sum(data["Scheduled consult"] for data in intake_results.values())
+        total_showed_up = sum(data["Showed up"] for data in intake_results.values())
+        total_retained_after = sum(data["Retained after consult"] for data in intake_results.values())
+        total_retained = sum(data["Total retained"] for data in intake_results.values())
+        
+        # Calculate percentages for ALL
+        all_pct_total = _pct(total_pncs_intake, total_pncs) if total_pncs > 0 else 0
+        all_pct_remaining_scheduled = _pct(total_scheduled, (total_pncs_intake - total_retained_without)) if (total_pncs_intake - total_retained_without) > 0 else 0
+        all_pct_showed_up = _pct(total_showed_up, total_scheduled) if total_scheduled > 0 else 0
+        all_pct_retained_after = _pct(total_retained_after, total_scheduled) if total_scheduled > 0 else 0
+        all_pct_total_retained = _pct(total_retained, total_pncs_intake) if total_pncs_intake > 0 else 0
+        
+        # Create summary table with summed metrics
+        all_summary_rows = [
+            ("Total PNCs all intake specialists did intake", str(total_pncs_intake)),
+            ("% of total PNCs received all intake specialists did intake", f"{int(round(all_pct_total))}%"),
+            ("Total PNCs who retained without consultation", str(total_retained_without)),
+            ("Total PNCs who scheduled consultation", str(total_scheduled)),
+            ("% of remaining PNCs who scheduled consult", f"{int(round(all_pct_remaining_scheduled))}%"),
+            ("Total PNCs who showed up for consultation", str(total_showed_up)),
+            ("% of PNCs who showed up for consultation", f"{int(round(all_pct_showed_up))}%"),
+            ("Total PNCs retained after scheduled consultation", str(total_retained_after)),
+            ("% of PNCs who retained after scheduled consult", f"{int(round(all_pct_retained_after))}%"),
+            ("All intake specialists' total PNCs who retained", str(total_retained)),
+            ("% of total PNCs received who retained", f"{int(round(all_pct_total_retained))}%"),
+        ]
+        
+        all_summary_df = pd.DataFrame(all_summary_rows, columns=["Metric", "Value"])
+        st.dataframe(all_summary_df, use_container_width=True, hide_index=True)
+        
+    else:
+        # Show detailed metrics for selected specialist in row format like practice area
+        st.subheader(f"Intake Metrics - {selected_intake}")
+        
+        data = intake_results[selected_intake]
+        
+        # Create row-based table like practice area section with personalized labels
+        intake_rows = [
+            (f"PNCs {selected_intake} did intake", str(data["PNCs did intake"])),
+            (f"% of total PNCs received {selected_intake} did intake", f"{int(round(data['% of total PNCs']))}%"),
+            (f"PNCs who retained without consultation", str(data["Retained without consult"])),
+            (f"PNCs who scheduled consultation", str(data["Scheduled consult"])),
+            (f"% of remaining PNCs who scheduled consult", f"{int(round(data['% remaining scheduled']))}%"),
+            (f"PNCs who showed up for consultation", str(data["Showed up"])),
+            (f"% of PNCs who showed up for consultation", f"{int(round(data['% showed up']))}%"),
+            (f"PNCs retained after scheduled consultation", str(data["Retained after consult"])),
+            (f"% of PNCs who retained after scheduled consult", f"{int(round(data['% retained after consult']))}%"),
+            (f"{selected_intake}'s total PNCs who retained", str(data["Total retained"])),
+            (f"% of total PNCs received who retained", f"{int(round(data['% total retained']))}%"),
+        ]
+        
+        # Create DataFrame for display
+        intake_df = pd.DataFrame(intake_rows, columns=["Metric", "Value"])
+        st.dataframe(intake_df, use_container_width=True, hide_index=True)
 
 with st.expander("📊 Conversion Trend Visualizations", expanded=False):
     st.header("📊 Conversion Trend Visualizations")
