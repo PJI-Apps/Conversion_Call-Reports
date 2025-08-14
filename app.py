@@ -996,9 +996,10 @@ with st.expander("🧾 Data Upload & Management", expanded=st.session_state.get(
             if isinstance(existing, pd.DataFrame) and not existing.empty and "__batch_id" in existing.columns:
                 batch_exists = existing["__batch_id"].eq(batch_id).any()
 
-            if fhash in st.session_state["hashes_calls"] and batch_exists and not force_replace_calls:
-                st.caption(f"Calls: same file and batch '{batch_id}' already present — upload skipped.")
-                log("Calls upload skipped by session dedupe guard.")
+            # Only skip if batch exists and we don't want to replace
+            if batch_exists and not force_replace_calls:
+                st.caption(f"Calls: batch '{batch_id}' already present — upload skipped.")
+                log("Calls upload skipped by batch dedupe guard.")
             else:
                 raw = pd.read_csv(calls_uploader)
                 
@@ -1074,9 +1075,10 @@ with st.expander("🧾 Data Upload & Management", expanded=st.session_state.get(
             if isinstance(existing, pd.DataFrame) and not existing.empty and "__batch_id" in existing.columns:
                 batch_exists = existing["__batch_id"].eq(batch_id).any()
 
-            if fhash in st.session_state["hashes_conv"] and batch_exists and not want_replace:
-                st.caption(f"{key_name}: duplicate file and batch '{batch_id}' already present — ignored.")
-                log(f"{key_name} skipped by session dedupe guard.")
+            # Only skip if batch exists and we don't want to replace
+            if batch_exists and not want_replace:
+                st.caption(f"{key_name}: batch '{batch_id}' already present — ignored.")
+                log(f"{key_name} skipped by batch dedupe guard.")
                 continue
 
             df_up = _read_any(upl)
