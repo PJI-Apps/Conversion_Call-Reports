@@ -462,6 +462,26 @@ def render_admin_sidebar():
                     else:              st.session_state.get("hashes_conv", set()).clear()
                     st.session_state["gs_ver"] += 1; st.rerun()
 
+        with st.container(border=True):
+            st.markdown("**🗑️ Wipe ALL Sheets**")
+            st.caption("Deletes every row in ALL sheets at once. Use with extreme care.")
+            confirm_wipe_all = st.checkbox("I understand this will delete ALL data from ALL sheets.", key="confirm_wipe_all")
+            if st.button("🗑️ Wipe ALL Sheets", disabled=not confirm_wipe_all, use_container_width=True):
+                success_count = 0
+                total_sheets = 5
+                for sheet_key in ["CALLS", "LEADS", "INIT", "DISC", "NCL"]:
+                    if _wipe_all(sheet_key):
+                        success_count += 1
+                
+                if success_count == total_sheets:
+                    st.success(f"Successfully wiped all {total_sheets} sheets!")
+                    st.session_state.get("hashes_calls", set()).clear()
+                    st.session_state.get("hashes_conv", set()).clear()
+                    st.session_state["gs_ver"] += 1
+                    st.rerun()
+                else:
+                    st.error(f"Wipe failed for {total_sheets - success_count} sheets. Only {success_count}/{total_sheets} sheets cleared.")
+
         # Enhanced Batch Management Section
         st.divider()
         st.subheader("📦 Batch Management")
