@@ -1047,6 +1047,15 @@ else:
 
 st.caption(f"Showing Conversion metrics for **{start_date:%-d %b %Y} → {end_date:%-d %b %Y}**")
 
+# Helper to find a column by name (case-insensitive)
+def _find_col(df: pd.DataFrame, candidates: list[str]) -> Optional[str]:
+    if df is None or df.empty: return None
+    cols = {c.lower().strip(): c for c in df.columns}
+    for cand in candidates:
+        k = cand.lower().strip()
+        if k in cols: return cols[k]
+    return None
+
 # Filtered slices (date-in-range only; column names are fixed by your files)
 # Find the correct column names
 ic_date_col = _find_col(df_init, ["Initial Consultation With Pji Law", "Initial Consultation"])
@@ -1105,15 +1114,6 @@ row2 = int(
         (~df_leads["Stage"].astype(str).str.strip().isin(EXCLUDED_PNC_STAGES))
     ].shape[0]
 ) if not df_leads.empty and "Stage" in df_leads.columns else 0
-
-# Helper to find a column by name (case-insensitive)
-def _find_col(df: pd.DataFrame, candidates: list[str]) -> Optional[str]:
-    if df is None or df.empty: return None
-    cols = {c.lower().strip(): c for c in df.columns}
-    for cand in candidates:
-        k = cand.lower().strip()
-        if k in cols: return cols[k]
-    return None
 
 # === SCHEDULED & MET (exact to your rules) ===
 def _scheduled_and_met(df: pd.DataFrame) -> Tuple[int, int]:
