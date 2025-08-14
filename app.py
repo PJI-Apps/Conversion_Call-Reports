@@ -568,6 +568,24 @@ def render_admin_sidebar():
             if assign_batch_to_orphaned_records(key, orphaned_batch_id):
                 st.session_state["gs_ver"] += 1
                 st.rerun()
+    
+    # Add a button to fix all missing batch IDs
+    st.divider()
+    st.markdown("**🔧 Fix All Missing Batch IDs**")
+    st.caption("Assign batch ID to all records that don't have one")
+    
+    if st.button("🔧 Fix All Missing Batch IDs", use_container_width=True):
+        success_count = 0
+        for sheet_key in ["CALLS", "LEADS", "INIT", "DISC", "NCL"]:
+            if assign_batch_to_orphaned_records(sheet_key, "legacy_data"):
+                success_count += 1
+        
+        if success_count > 0:
+            st.success(f"Fixed batch IDs in {success_count} sheets")
+            st.session_state["gs_ver"] += 1
+            st.rerun()
+        else:
+            st.info("No missing batch IDs found")
 
 # Render it now
 render_admin_sidebar()
@@ -1084,6 +1102,18 @@ with st.expander("🔍 DEBUG: Data Loading Status", expanded=False):
     st.write(f"Initial Consultation data: {len(df_init) if df_init is not None and not df_init.empty else 'No data'}")
     st.write(f"Discovery Meeting data: {len(df_disc) if df_disc is not None and not df_disc.empty else 'No data'}")
     st.write(f"New Client List data: {len(df_ncl) if df_ncl is not None and not df_ncl.empty else 'No data'}")
+    
+    # Check for missing batch IDs
+    st.write("**Batch ID Status:**")
+    for name, df in [("Calls", df_calls), ("Leads", df_leads), ("Initial Consultation", df_init), 
+                    ("Discovery Meeting", df_disc), ("New Client List", df_ncl)]:
+        if df is not None and not df.empty:
+            if "__batch_id" in df.columns:
+                missing_batch = df["__batch_id"].isna() | (df["__batch_id"] == "")
+                missing_count = missing_batch.sum()
+                st.write(f"{name}: {missing_count} records missing batch ID out of {len(df)} total")
+            else:
+                st.write(f"{name}: No __batch_id column found")
     
     if GSHEET:
         st.write("**Available tabs in Google Sheet:**")
