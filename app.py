@@ -986,7 +986,7 @@ with st.expander("🧾 Data Upload & Management", expanded=st.session_state.get(
             batch_id = st.session_state["current_batch_id"]
             
             # Check if this batch already exists
-                existing = _read_ws_by_name("CALLS")
+            existing = _read_ws_by_name("CALLS")
             batch_exists = False
             if isinstance(existing, pd.DataFrame) and not existing.empty and "__batch_id" in existing.columns:
                 batch_exists = existing["__batch_id"].eq(batch_id).any()
@@ -1010,8 +1010,8 @@ with st.expander("🧾 Data Upload & Management", expanded=st.session_state.get(
                     st.error("Please upload the correct ZoomUS calls export file with columns like 'Name', 'Total Calls', 'Completed Calls', etc.")
                     st.caption(f"Detected conversion report headers: {', '.join([col for col in raw.columns if col in conversion_indicators])}")
                 else:
-                processed = process_calls_csv(raw, calls_period_key)
-                processed_clean = processed[CALLS_MASTER_COLS].copy()
+                    processed = process_calls_csv(raw, calls_period_key)
+                    processed_clean = processed[CALLS_MASTER_COLS].copy()
                     
                     # Add batch metadata
                     processed_clean = add_batch_metadata(
@@ -1022,28 +1022,28 @@ with st.expander("🧾 Data Upload & Management", expanded=st.session_state.get(
                         upload_end
                     )
 
-                if GSHEET is None:
-                    st.warning("Master store not configured; Calls will not persist.")
-                    df_calls_master = processed_clean.copy()
-                else:
-                    current = _read_ws_by_name("CALLS")
+                    if GSHEET is None:
+                        st.warning("Master store not configured; Calls will not persist.")
+                        df_calls_master = processed_clean.copy()
+                    else:
+                        current = _read_ws_by_name("CALLS")
                         
                         # Remove existing batch if force replace
                         if force_replace_calls and batch_exists and not current.empty:
                             current = current[current["__batch_id"] != batch_id].copy()
                         
-                    combined = (pd.concat([current, processed_clean], ignore_index=True)
-                                if not current.empty else processed_clean.copy())
+                        combined = (pd.concat([current, processed_clean], ignore_index=True)
+                                    if not current.empty else processed_clean.copy())
                         
                         # Dedupe by Month-Year + Name + Category (keeping latest batch)
-                    key = (combined["Month-Year"].astype(str).str.strip() + "|" +
-                           combined["Name"].astype(str).str.strip() + "|" +
-                           combined["Category"].astype(str).str.strip())
-                    combined = combined.loc[~key.duplicated(keep="last")].copy()
+                        key = (combined["Month-Year"].astype(str).str.strip() + "|" +
+                               combined["Name"].astype(str).str.strip() + "|" +
+                               combined["Category"].astype(str).str.strip())
+                        combined = combined.loc[~key.duplicated(keep="last")].copy()
                         
-                    _write_ws_by_name("CALLS", combined)
+                        _write_ws_by_name("CALLS", combined)
                         st.success(f"Calls: upserted {len(processed_clean)} row(s) with batch ID '{batch_id}'.")
-                    df_calls_master = combined.copy()
+                        df_calls_master = combined.copy()
                 st.session_state["hashes_calls"].add(fhash)
         except Exception as e:
             st.error("Could not parse Calls CSV."); st.exception(e)
@@ -1199,7 +1199,7 @@ st.markdown("---")
 st.header("📞 Zoom Call Reports")
 
 with st.expander("📞 Calls Report", expanded=False):
-st.subheader("Filters — Calls")
+    st.subheader("Filters — Calls")
 months_map = {"01":"January","02":"February","03":"March","04":"April","05":"May","06":"June",
               "07":"July","08":"August","09":"September","10":"October","11":"November","12":"December"}
 def month_num_to_name(mnum): return months_map.get(mnum, mnum)
@@ -1334,7 +1334,7 @@ st.markdown("---")
 st.header("📊 Firm Conversion Report")
 
 with st.expander("📅 Filter", expanded=False):
-row = st.columns([2, 1, 1])  # Period (wide), Year, Month
+    row = st.columns([2, 1, 1])  # Period (wide), Year, Month
 
 months_map_names = {
     1:"January",2:"February",3:"March",4:"April",5:"May",6:"June",
@@ -1575,7 +1575,7 @@ html_table = """
 </table>
 """
 with st.expander("📊 Summary", expanded=False):
-st.markdown(html_table, unsafe_allow_html=True)
+    st.markdown(html_table, unsafe_allow_html=True)
 
 st.header("📊 Practice Area")
 
