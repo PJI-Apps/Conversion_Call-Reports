@@ -1203,8 +1203,12 @@ with st.expander("🔍 DEBUG: Data Loading Status", expanded=False):
     
     if GSHEET:
         st.write("**Available tabs in Google Sheet:**")
-        tab_names = [ws.title for ws in GSHEET.worksheets()]
-        st.write(tab_names)
+        try:
+            tab_names = [ws.title for ws in GSHEET.worksheets()]
+            st.write(tab_names)
+        except Exception as e:
+            log(f"Could not list worksheets: {e}")
+            st.write("Unable to list worksheets - check Google Sheets connection")
         
         st.write("**Current TAB_NAMES configuration:**")
         st.write(TAB_NAMES)
