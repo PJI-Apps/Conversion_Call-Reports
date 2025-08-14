@@ -1112,6 +1112,10 @@ with st.expander("🔍 DEBUG: Data Loading Status", expanded=False):
                 missing_batch = df["__batch_id"].isna() | (df["__batch_id"] == "")
                 missing_count = missing_batch.sum()
                 st.write(f"{name}: {missing_count} records missing batch ID out of {len(df)} total")
+                
+                # Show unique batch IDs
+                unique_batches = df["__batch_id"].dropna().unique()
+                st.write(f"{name} unique batch IDs: {list(unique_batches)}")
             else:
                 st.write(f"{name}: No __batch_id column found")
     
