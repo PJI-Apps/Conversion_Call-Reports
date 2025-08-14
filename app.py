@@ -212,8 +212,6 @@ def master_reset() -> bool:
         for key in file_uploader_keys:
             if key in st.session_state:
                 del st.session_state[key]
-            # Also set to None to ensure the widget display is cleared
-            st.session_state[key] = None
         
         st.success("Master reset completed - all data cleared from all sheets (headers preserved)")
         return True
@@ -663,10 +661,6 @@ def render_admin_sidebar():
                     if key in st.session_state:
                         del st.session_state[key]
                         cleared_keys.append(key)
-                
-                # Also try setting file uploader keys to None (sometimes this works better)
-                for key in file_uploader_keys:
-                    st.session_state[key] = None
                 
                 # Force a rerun to refresh the UI
                 st.success(f"File uploader displays cleared. Cleared keys: {', '.join(cleared_keys)}")
