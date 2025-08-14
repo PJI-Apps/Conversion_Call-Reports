@@ -156,11 +156,11 @@ def master_reset() -> bool:
 # Google Sheets master + caching
 # ───────────────────────────────────────────────────────────────────────────────
 TAB_NAMES = {
-    "CALLS": "Call_Report_Master",
-    "LEADS": "Leads_PNCs_Master",
-    "INIT":  "Initial_Consultation_Master",
-    "DISC":  "Discovery_Meeting_Master",
-    "NCL":   "New_Client_List_Master",
+    "CALLS": "CALLS",
+    "LEADS": "LEADS",
+    "INIT":  "INIT",
+    "DISC":  "DISC",
+    "NCL":   "NCL",
 }
 TAB_FALLBACKS = {
     "CALLS": ["Zoom_Calls"],
@@ -871,41 +871,54 @@ with st.expander("🧾 Data Upload & Management", expanded=st.session_state.get(
                 log("Calls upload skipped by session dedupe guard.")
             else:
                 raw = pd.read_csv(calls_uploader)
-                processed = process_calls_csv(raw, calls_period_key)
-                processed_clean = processed[CALLS_MASTER_COLS].copy()
                 
-                # Add batch metadata
-                processed_clean = add_batch_metadata(
-                    processed_clean, 
-                    batch_id, 
-                    date.today(), 
-                    upload_start, 
-                    upload_end
-                )
-
-                if GSHEET is None:
-                    st.warning("Master store not configured; Calls will not persist.")
-                    df_calls_master = processed_clean.copy()
+                # Check if this looks like a calls report or conversion report
+                conversion_indicators = ["First Name", "Last Name", "Email", "Stage", "Matter ID", "Initial Consultation With Pji Law"]
+                calls_indicators = ["Name", "Total Calls", "Completed Calls", "Outgoing", "Received"]
+                
+                conversion_count = sum(1 for col in raw.columns if col in conversion_indicators)
+                calls_count = sum(1 for col in raw.columns if col in calls_indicators)
+                
+                if conversion_count > calls_count:
+                    st.error("❌ Wrong file type! This appears to be a conversion report file (Leads_PNCs.csv), not a calls report file.")
+                    st.error("Please upload the correct ZoomUS calls export file with columns like 'Name', 'Total Calls', 'Completed Calls', etc.")
+                    st.caption(f"Detected conversion report headers: {', '.join([col for col in raw.columns if col in conversion_indicators])}")
                 else:
-                    current = _read_ws_by_name("CALLS")
+                    processed = process_calls_csv(raw, calls_period_key)
+                    processed_clean = processed[CALLS_MASTER_COLS].copy()
                     
-                    # Remove existing batch if force replace
-                    if force_replace_calls and batch_exists and not current.empty:
-                        current = current[current["__batch_id"] != batch_id].copy()
-                    
-                    combined = (pd.concat([current, processed_clean], ignore_index=True)
-                                if not current.empty else processed_clean.copy())
-                    
-                    # Dedupe by Month-Year + Name + Category (keeping latest batch)
-                    key = (combined["Month-Year"].astype(str).str.strip() + "|" +
-                           combined["Name"].astype(str).str.strip() + "|" +
-                           combined["Category"].astype(str).str.strip())
-                    combined = combined.loc[~key.duplicated(keep="last")].copy()
-                    
-                    _write_ws_by_name("CALLS", combined)
-                    st.success(f"Calls: upserted {len(processed_clean)} row(s) with batch ID '{batch_id}'.")
-                    df_calls_master = combined.copy()
-                st.session_state["hashes_calls"].add(fhash)
+                    # Add batch metadata
+                    processed_clean = add_batch_metadata(
+                        processed_clean, 
+                        batch_id, 
+                        date.today(), 
+                        upload_start, 
+                        upload_end
+                    )
+
+                    if GSHEET is None:
+                        st.warning("Master store not configured; Calls will not persist.")
+                        df_calls_master = processed_clean.copy()
+                    else:
+                        current = _read_ws_by_name("CALLS")
+                        
+                        # Remove existing batch if force replace
+                        if force_replace_calls and batch_exists and not current.empty:
+                            current = current[current["__batch_id"] != batch_id].copy()
+                        
+                        combined = (pd.concat([current, processed_clean], ignore_index=True)
+                                    if not current.empty else processed_clean.copy())
+                        
+                        # Dedupe by Month-Year + Name + Category (keeping latest batch)
+                        key = (combined["Month-Year"].astype(str).str.strip() + "|" +
+                               combined["Name"].astype(str).str.strip() + "|" +
+                               combined["Category"].astype(str).str.strip())
+                        combined = combined.loc[~key.duplicated(keep="last")].copy()
+                        
+                        _write_ws_by_name("CALLS", combined)
+                        st.success(f"Calls: upserted {len(processed_clean)} row(s) with batch ID '{batch_id}'.")
+                        df_calls_master = combined.copy()
+                    st.session_state["hashes_calls"].add(fhash)
         except Exception as e:
             st.error("Could not parse Calls CSV."); st.exception(e)
 
