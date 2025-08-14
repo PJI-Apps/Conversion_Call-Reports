@@ -1076,12 +1076,22 @@ df_init  = _read_ws_by_name("INIT")  if GSHEET is not None else pd.DataFrame()
 df_disc  = _read_ws_by_name("DISC")  if GSHEET is not None else pd.DataFrame()
 df_ncl   = _read_ws_by_name("NCL")   if GSHEET is not None else pd.DataFrame()
 
-# Debug: Check DataFrame states after loading (commented out for cleaner output)
-# st.write(f"DEBUG: df_calls empty: {df_calls.empty}, columns: {list(df_calls.columns) if not df_calls.empty else 'No data'}")
-# st.write(f"DEBUG: df_leads empty: {df_leads.empty}, columns: {list(df_leads.columns) if not df_leads.empty else 'No data'}")
-# st.write(f"DEBUG: df_init empty: {df_init.empty}, columns: {list(df_init.columns) if not df_init.empty else 'No data'}")
-# st.write(f"DEBUG: df_disc empty: {df_disc.empty}, columns: {list(df_disc.columns) if not df_disc.empty else 'No data'}")
-# st.write(f"DEBUG: df_ncl empty: {df_ncl.empty}, columns: {list(df_ncl.columns) if not df_ncl.empty else 'No data'}")
+# Debug: Check data loading status
+with st.expander("🔍 DEBUG: Data Loading Status", expanded=False):
+    st.write("**Data Loading Status:**")
+    st.write(f"Calls data: {len(df_calls) if df_calls is not None and not df_calls.empty else 'No data'}")
+    st.write(f"Leads data: {len(df_leads) if df_leads is not None and not df_leads.empty else 'No data'}")
+    st.write(f"Initial Consultation data: {len(df_init) if df_init is not None and not df_init.empty else 'No data'}")
+    st.write(f"Discovery Meeting data: {len(df_disc) if df_disc is not None and not df_disc.empty else 'No data'}")
+    st.write(f"New Client List data: {len(df_ncl) if df_ncl is not None and not df_ncl.empty else 'No data'}")
+    
+    if GSHEET:
+        st.write("**Available tabs in Google Sheet:**")
+        tab_names = [ws.title for ws in GSHEET.worksheets()]
+        st.write(tab_names)
+        
+        st.write("**Current TAB_NAMES configuration:**")
+        st.write(TAB_NAMES)
 
 if not df_calls.empty:
     df_calls["__avg_sec"]   = pd.to_timedelta(df_calls["Avg Call Time"], errors="coerce").dt.total_seconds().fillna(0.0)
@@ -2507,10 +2517,14 @@ with st.expander("Debugging & Troubleshooting", expanded=False):
         
         if not summary.empty:
             st.write("Estate Planning — summary by attorney & source:", summary)
-        st.write("**EP totals — Included = met (IC+DM):**", int(ep_audit["Included"].sum()))
-        show_cols = ["Attorney","Date","Source","Sub Status","Reason","InRange","IsFollowUp","HasCanceledMeeting","HasNoShow","Included"]
-        st.dataframe(ep_audit[show_cols].sort_values(["Date","Attorney"]).reset_index(drop=True),
-                     use_container_width=True)
+        
+        if not ep_audit.empty and "Included" in ep_audit.columns:
+            st.write("**EP totals — Included = met (IC+DM):**", int(ep_audit["Included"].sum()))
+            show_cols = ["Attorney","Date","Source","Sub Status","Reason","InRange","IsFollowUp","HasCanceledMeeting","HasNoShow","Included"]
+            st.dataframe(ep_audit[show_cols].sort_values(["Date","Attorney"]).reset_index(drop=True),
+                         use_container_width=True)
+        else:
+            st.info("No Estate Planning data available for the selected date range.")
 
 
     with st.expander("Debug details (for reconciliation)", expanded=False):
