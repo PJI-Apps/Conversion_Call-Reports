@@ -1263,34 +1263,29 @@ def _find_col(df: pd.DataFrame, candidates: list[str]) -> Optional[str]:
 
 # Filtered slices (date-in-range only; column names are fixed by your files)
 # Find the correct column names
-# Debug: Show available columns
-if not df_init.empty:
-    st.caption(f"INIT columns: {list(df_init.columns)}")
-if not df_disc.empty:
-    st.caption(f"DISC columns: {list(df_disc.columns)}")
-if not df_ncl.empty:
-    st.caption(f"NCL columns: {list(df_ncl.columns)}")
-
-ic_date_col = _find_col(df_init, ["Initial Consultation With Pji Law", "Initial Consultation", "Initial Consultation With Pji Law"])
-dm_date_col = _find_col(df_disc, ["Discovery Meeting With Pji Law", "Discovery Meeting", "Discovery Meeting With Pji Law"])
-ncl_date_col = _find_col(df_ncl, ["Date we had BOTH the signed CLA and full payment", "Date we had BOTH", "Date", "Date we had BOTH the signed CLA and full payment"])
+ic_date_col = _find_col(df_init, ["Initial Consultation With Pji Law"])
+dm_date_col = _find_col(df_disc, ["Discovery Meeting With Pji Law"])
+ncl_date_col = _find_col(df_ncl, ["Date we had BOTH the signed CLA and full payment"])
 
 if ic_date_col is None:
-    st.error("Could not find Initial Consultation date column")
-    ic_mask = pd.Series(False, index=df_init.index if not df_init.empty else [])
+    st.error(f"Could not find Initial Consultation date column. Available columns: {list(df_init.columns) if not df_init.empty else 'No data'}")
+    init_mask = pd.Series(False, index=df_init.index if not df_init.empty else [])
 else:
+    st.success(f"Found IC date column: {ic_date_col}")
     init_mask = _mask_by_range_dates(df_init, ic_date_col, start_date, end_date)
 
 if dm_date_col is None:
-    st.error("Could not find Discovery Meeting date column")
+    st.error(f"Could not find Discovery Meeting date column. Available columns: {list(df_disc.columns) if not df_disc.empty else 'No data'}")
     disc_mask = pd.Series(False, index=df_disc.index if not df_disc.empty else [])
 else:
+    st.success(f"Found DM date column: {dm_date_col}")
     disc_mask = _mask_by_range_dates(df_disc, dm_date_col, start_date, end_date)
 
 if ncl_date_col is None:
-    st.error("Could not find NCL date column")
+    st.error(f"Could not find NCL date column. Available columns: {list(df_ncl.columns) if not df_ncl.empty else 'No data'}")
     ncl_mask = pd.Series(False, index=df_ncl.index if not df_ncl.empty else [])
 else:
+    st.success(f"Found NCL date column: {ncl_date_col}")
     ncl_mask = _mask_by_range_dates(df_ncl, ncl_date_col, start_date, end_date)
 
 init_in = df_init.loc[init_mask].copy() if not df_init.empty else pd.DataFrame()
