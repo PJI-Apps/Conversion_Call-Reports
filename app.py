@@ -1263,9 +1263,17 @@ def _find_col(df: pd.DataFrame, candidates: list[str]) -> Optional[str]:
 
 # Filtered slices (date-in-range only; column names are fixed by your files)
 # Find the correct column names
-ic_date_col = _find_col(df_init, ["Initial Consultation With Pji Law", "Initial Consultation"])
-dm_date_col = _find_col(df_disc, ["Discovery Meeting With Pji Law", "Discovery Meeting"])
-ncl_date_col = _find_col(df_ncl, ["Date we had BOTH the signed CLA and full payment", "Date we had BOTH", "Date"])
+# Debug: Show available columns
+if not df_init.empty:
+    st.caption(f"INIT columns: {list(df_init.columns)}")
+if not df_disc.empty:
+    st.caption(f"DISC columns: {list(df_disc.columns)}")
+if not df_ncl.empty:
+    st.caption(f"NCL columns: {list(df_ncl.columns)}")
+
+ic_date_col = _find_col(df_init, ["Initial Consultation With Pji Law", "Initial Consultation", "Initial Consultation With Pji Law"])
+dm_date_col = _find_col(df_disc, ["Discovery Meeting With Pji Law", "Discovery Meeting", "Discovery Meeting With Pji Law"])
+ncl_date_col = _find_col(df_ncl, ["Date we had BOTH the signed CLA and full payment", "Date we had BOTH", "Date", "Date we had BOTH the signed CLA and full payment"])
 
 if ic_date_col is None:
     st.error("Could not find Initial Consultation date column")
