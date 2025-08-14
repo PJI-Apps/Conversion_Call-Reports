@@ -508,34 +508,73 @@ def render_admin_sidebar():
         def _dedupe_sheet(logical_key: str) -> tuple[bool, int]:
             df = _read_ws_by_name(logical_key)
             if df.empty: return True, 0
-            if logical_key == "LEADS":
-                k = (df.get("Email","").astype(str).str.strip() + "|" +
-                     df.get("Matter ID","").astype(str).str.strip() + "|" +
-                     df.get("Stage","").astype(str).str.strip() + "|" +
-                     df.get("Initial Consultation With Pji Law","").astype(str) + "|" +
-                     df.get("Discovery Meeting With Pji Law","").astype(str))
-            elif logical_key == "INIT":
-                k = (df.get("Email","").astype(str).str.strip() + "|" +
-                     df.get("Matter ID","").astype(str).str.strip() + "|" +
-                     df.get("Initial Consultation With Pji Law","").astype(str) + "|" +
-                     df.get("Sub Status","").astype(str).str.strip())
-            elif logical_key == "DISC":
-                k = (df.get("Email","").astype(str).str.strip() + "|" +
-                     df.get("Matter ID","").astype(str).str.strip() + "|" +
-                     df.get("Discovery Meeting With Pji Law","").astype(str) + "|" +
-                     df.get("Sub Status","").astype(str).str.strip())
-            elif logical_key == "NCL":
-                flag_col = "Retained With Consult (Y/N)"
-                if flag_col not in df.columns and "Retained with Consult (Y/N)" in df.columns:
-                    df = df.rename(columns={"Retained with Consult (Y/N)": flag_col})
-                k = (df.get("Client Name","").astype(str).str.strip() + "|" +
-                     df.get("Matter Number/Link","").astype(str).str.strip() + "|" +
-                     df.get("Date we had BOTH the signed CLA and full payment","").astype(str) + "|" +
-                     df.get(flag_col,"").astype(str).str.strip())
-            else:  # CALLS
-                k = (df.get("Month-Year","").astype(str).str.strip() + "|" +
-                     df.get("Name","").astype(str).str.strip() + "|" +
-                     df.get("Category","").astype(str).str.strip())
+            
+            # Include batch ID in deduplication if available
+            if "__batch_id" in df.columns:
+                if logical_key == "LEADS":
+                    k = (df.get("Email","").astype(str).str.strip() + "|" +
+                         df.get("Matter ID","").astype(str).str.strip() + "|" +
+                         df.get("Stage","").astype(str).str.strip() + "|" +
+                         df.get("Initial Consultation With Pji Law","").astype(str) + "|" +
+                         df.get("Discovery Meeting With Pji Law","").astype(str) + "|" +
+                         df.get("__batch_id","").astype(str).str.strip())
+                elif logical_key == "INIT":
+                    k = (df.get("Email","").astype(str).str.strip() + "|" +
+                         df.get("Matter ID","").astype(str).str.strip() + "|" +
+                         df.get("Initial Consultation With Pji Law","").astype(str) + "|" +
+                         df.get("Sub Status","").astype(str).str.strip() + "|" +
+                         df.get("__batch_id","").astype(str).str.strip())
+                elif logical_key == "DISC":
+                    k = (df.get("Email","").astype(str).str.strip() + "|" +
+                         df.get("Matter ID","").astype(str).str.strip() + "|" +
+                         df.get("Discovery Meeting With Pji Law","").astype(str) + "|" +
+                         df.get("Sub Status","").astype(str).str.strip() + "|" +
+                         df.get("__batch_id","").astype(str).str.strip())
+                elif logical_key == "NCL":
+                    flag_col = "Retained With Consult (Y/N)"
+                    if flag_col not in df.columns and "Retained with Consult (Y/N)" in df.columns:
+                        df = df.rename(columns={"Retained with Consult (Y/N)": flag_col})
+                    k = (df.get("Client Name","").astype(str).str.strip() + "|" +
+                         df.get("Matter Number/Link","").astype(str).str.strip() + "|" +
+                         df.get("Date we had BOTH the signed CLA and full payment","").astype(str) + "|" +
+                         df.get(flag_col,"").astype(str).str.strip() + "|" +
+                         df.get("__batch_id","").astype(str).str.strip())
+                else:  # CALLS
+                    k = (df.get("Month-Year","").astype(str).str.strip() + "|" +
+                         df.get("Name","").astype(str).str.strip() + "|" +
+                         df.get("Category","").astype(str).str.strip() + "|" +
+                         df.get("__batch_id","").astype(str).str.strip())
+            else:
+                # Fallback to original logic if no batch ID
+                if logical_key == "LEADS":
+                    k = (df.get("Email","").astype(str).str.strip() + "|" +
+                         df.get("Matter ID","").astype(str).str.strip() + "|" +
+                         df.get("Stage","").astype(str).str.strip() + "|" +
+                         df.get("Initial Consultation With Pji Law","").astype(str) + "|" +
+                         df.get("Discovery Meeting With Pji Law","").astype(str))
+                elif logical_key == "INIT":
+                    k = (df.get("Email","").astype(str).str.strip() + "|" +
+                         df.get("Matter ID","").astype(str).str.strip() + "|" +
+                         df.get("Initial Consultation With Pji Law","").astype(str) + "|" +
+                         df.get("Sub Status","").astype(str).str.strip())
+                elif logical_key == "DISC":
+                    k = (df.get("Email","").astype(str).str.strip() + "|" +
+                         df.get("Matter ID","").astype(str).str.strip() + "|" +
+                         df.get("Discovery Meeting With Pji Law","").astype(str) + "|" +
+                         df.get("Sub Status","").astype(str).str.strip())
+                elif logical_key == "NCL":
+                    flag_col = "Retained With Consult (Y/N)"
+                    if flag_col not in df.columns and "Retained with Consult (Y/N)" in df.columns:
+                        df = df.rename(columns={"Retained with Consult (Y/N)": flag_col})
+                    k = (df.get("Client Name","").astype(str).str.strip() + "|" +
+                         df.get("Matter Number/Link","").astype(str).str.strip() + "|" +
+                         df.get("Date we had BOTH the signed CLA and full payment","").astype(str) + "|" +
+                         df.get(flag_col,"").astype(str).str.strip())
+                else:  # CALLS
+                    k = (df.get("Month-Year","").astype(str).str.strip() + "|" +
+                         df.get("Name","").astype(str).str.strip() + "|" +
+                         df.get("Category","").astype(str).str.strip())
+            
             before = len(df)
             df2 = df.loc[~k.duplicated(keep="last")].copy()
             ok = _write_ws_by_name(logical_key, df2)
@@ -1057,10 +1096,18 @@ with st.expander("🧾 Data Upload & Management", expanded=st.session_state.get(
                         combined = (pd.concat([current, processed_clean], ignore_index=True)
                                     if not current.empty else processed_clean.copy())
                         
-                        # Dedupe by Month-Year + Name + Category (keeping latest batch)
-                        key = (combined["Month-Year"].astype(str).str.strip() + "|" +
-                               combined["Name"].astype(str).str.strip() + "|" +
-                               combined["Category"].astype(str).str.strip())
+                        # Dedupe by Month-Year + Name + Category + Batch ID (keeping latest batch)
+                        # This ensures different batches for the same person/category are preserved
+                        if "__batch_id" in combined.columns:
+                            key = (combined["Month-Year"].astype(str).str.strip() + "|" +
+                                   combined["Name"].astype(str).str.strip() + "|" +
+                                   combined["Category"].astype(str).str.strip() + "|" +
+                                   combined["__batch_id"].astype(str).str.strip())
+                        else:
+                            # Fallback to original logic if no batch ID
+                            key = (combined["Month-Year"].astype(str).str.strip() + "|" +
+                                   combined["Name"].astype(str).str.strip() + "|" +
+                                   combined["Category"].astype(str).str.strip())
                         combined = combined.loc[~key.duplicated(keep="last")].copy()
                         
                         _write_ws_by_name("CALLS", combined)
@@ -1139,28 +1186,57 @@ with st.expander("🧾 Data Upload & Management", expanded=st.session_state.get(
 
             combined = pd.concat([current, df_up], ignore_index=True) if not current.empty else df_up.copy()
 
-            # Dedupe by dataset keys (keeping latest batch)
-            if key_name == "LEADS":
-                k = (combined.get("Email","").astype(str).str.strip() + "|" +
-                     combined.get("Matter ID","").astype(str).str.strip() + "|" +
-                     combined.get("Stage","").astype(str).str.strip() + "|" +
-                     combined.get("Initial Consultation With Pji Law","").astype(str) + "|" +
-                     combined.get("Discovery Meeting With Pji Law","").astype(str))
-            elif key_name == "INIT":
-                k = (combined.get("Email","").astype(str).str.strip() + "|" +
-                     combined.get("Matter ID","").astype(str).str.strip() + "|" +
-                     combined.get("Initial Consultation With Pji Law","").astype(str) + "|" +
-                     combined.get("Sub Status","").astype(str).str.strip())
-            elif key_name == "DISC":
-                k = (combined.get("Email","").astype(str).str.strip() + "|" +
-                     combined.get("Matter ID","").astype(str).str.strip() + "|" +
-                     combined.get("Discovery Meeting With Pji Law","").astype(str) + "|" +
-                     combined.get("Sub Status","").astype(str).str.strip())
-            else:  # NCL
-                k = (combined.get("Client Name","").astype(str).str.strip() + "|" +
-                     combined.get("Matter Number/Link","").astype(str).str.strip() + "|" +
-                     combined.get("Date we had BOTH the signed CLA and full payment","").astype(str) + "|" +
-                     combined.get("Retained With Consult (Y/N)","").astype(str).str.strip())
+            # Dedupe by dataset keys + batch ID (keeping latest batch)
+            # This ensures different batches for the same person/matter are preserved
+            if "__batch_id" in combined.columns:
+                if key_name == "LEADS":
+                    k = (combined.get("Email","").astype(str).str.strip() + "|" +
+                         combined.get("Matter ID","").astype(str).str.strip() + "|" +
+                         combined.get("Stage","").astype(str).str.strip() + "|" +
+                         combined.get("Initial Consultation With Pji Law","").astype(str) + "|" +
+                         combined.get("Discovery Meeting With Pji Law","").astype(str) + "|" +
+                         combined.get("__batch_id","").astype(str).str.strip())
+                elif key_name == "INIT":
+                    k = (combined.get("Email","").astype(str).str.strip() + "|" +
+                         combined.get("Matter ID","").astype(str).str.strip() + "|" +
+                         combined.get("Initial Consultation With Pji Law","").astype(str) + "|" +
+                         combined.get("Sub Status","").astype(str).str.strip() + "|" +
+                         combined.get("__batch_id","").astype(str).str.strip())
+                elif key_name == "DISC":
+                    k = (combined.get("Email","").astype(str).str.strip() + "|" +
+                         combined.get("Matter ID","").astype(str).str.strip() + "|" +
+                         combined.get("Discovery Meeting With Pji Law","").astype(str) + "|" +
+                         combined.get("Sub Status","").astype(str).str.strip() + "|" +
+                         combined.get("__batch_id","").astype(str).str.strip())
+                else:  # NCL
+                    k = (combined.get("Client Name","").astype(str).str.strip() + "|" +
+                         combined.get("Matter Number/Link","").astype(str).str.strip() + "|" +
+                         combined.get("Date we had BOTH the signed CLA and full payment","").astype(str) + "|" +
+                         combined.get("Retained With Consult (Y/N)","").astype(str).str.strip() + "|" +
+                         combined.get("__batch_id","").astype(str).str.strip())
+            else:
+                # Fallback to original logic if no batch ID
+                if key_name == "LEADS":
+                    k = (combined.get("Email","").astype(str).str.strip() + "|" +
+                         combined.get("Matter ID","").astype(str).str.strip() + "|" +
+                         combined.get("Stage","").astype(str).str.strip() + "|" +
+                         combined.get("Initial Consultation With Pji Law","").astype(str) + "|" +
+                         combined.get("Discovery Meeting With Pji Law","").astype(str))
+                elif key_name == "INIT":
+                    k = (combined.get("Email","").astype(str).str.strip() + "|" +
+                         combined.get("Matter ID","").astype(str).str.strip() + "|" +
+                         combined.get("Initial Consultation With Pji Law","").astype(str) + "|" +
+                         combined.get("Sub Status","").astype(str).str.strip())
+                elif key_name == "DISC":
+                    k = (combined.get("Email","").astype(str).str.strip() + "|" +
+                         combined.get("Matter ID","").astype(str).str.strip() + "|" +
+                         combined.get("Discovery Meeting With Pji Law","").astype(str) + "|" +
+                         combined.get("Sub Status","").astype(str).str.strip())
+                else:  # NCL
+                    k = (combined.get("Client Name","").astype(str).str.strip() + "|" +
+                         combined.get("Matter Number/Link","").astype(str).str.strip() + "|" +
+                         combined.get("Date we had BOTH the signed CLA and full payment","").astype(str) + "|" +
+                         combined.get("Retained With Consult (Y/N)","").astype(str).str.strip())
 
             combined = combined.loc[~k.duplicated(keep="last")].copy()
             _write_ws_by_name(key_name, combined)
